@@ -63,6 +63,8 @@ _BLOCK_RE = [(re.compile(p, re.I), why) for p, why in _BLOCK]
 # El mensaje de un commit es texto, no un comando: «uso del proceso» no es un `del`. Solo se le quita eso; cualquier
 # otra cosa entre comillas (p. ej. `powershell -c "del x"`) se sigue revisando.
 _COMMIT_MSG = re.compile(r"""(?<![\w-])(?:-m|--message)(?:\s+|=)?(?:"[^"]*"|'[^']*')""", re.I)
+# `git rm --cached` solo saca el archivo del índice y lo deja en disco: hace falta para no versionar algo commiteado por error.
+_GIT_RM_CACHED = re.compile(r"\bgit\s+rm\b(?=[^;&|\n]*\s--cached\b)", re.I)
 _GIT_SEGMENT_SPLIT = re.compile(r"&&|\|\||[;&|\n]")
 _GIT_RESET_LOSES = re.compile(r"--(hard|merge|keep)\b", re.I)
 _GIT_STAGED_ONLY = re.compile(r"(--staged\b|\s-S\b)", re.I)
@@ -90,6 +92,7 @@ def check_command(command):
         return "comando vacío"
     if re.search(r"\bgit\b.*\bcommit\b", command, re.I):
         command = _COMMIT_MSG.sub(" ", command)
+    command = _GIT_RM_CACHED.sub("git untrack", command)
     for rx, why in _BLOCK_RE:
         if rx.search(command):
             return why
