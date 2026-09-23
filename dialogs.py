@@ -95,9 +95,79 @@ class ConfirmDialog:
             pass
         self.on_result(result)
 
+    def answer(self, result):
+        """Responde desde afuera (el celular): cierra la ventana como si se hubiera apretado el botón."""
+        self._finish(result)
+
     def dismiss(self):
         """Cierra la ventana denegando (lo usa la ventana principal al detener el agente)."""
         self._finish("deny")
+
+
+# ---------------------------------------------------------------- acceso remoto desde el celular
+
+class RemoteDialog:
+    def __init__(self, app):
+        self.app = app
+        t = app.t
+        self.win = w = tk.Toplevel(app.root)
+        w.title("Acceso remoto (celular)")
+        w.configure(bg=t["bg"])
+        w.transient(app.root)
+        f = ttk.Frame(w, padding=14)
+        f.pack(fill="both", expand=True)
+        self.on_var = tk.BooleanVar(value=app.remote_srv is not None)
+        ttk.Checkbutton(f, text="Permitir seguir y dirigir al agente desde el navegador del celular", variable=self.on_var,
+                        command=self.toggle).pack(anchor="w")
+        ttk.Label(f, text="Enlace (abrilo en el celular; tiene que estar en la misma red Wi-Fi que esta PC):").pack(anchor="w", pady=(10, 2))
+        self.link_var = tk.StringVar()
+        self.link_e = ttk.Entry(f, textvariable=self.link_var, width=64, state="readonly")
+        self.link_e.pack(fill="x")
+        bf = ttk.Frame(f)
+        bf.pack(fill="x", pady=(6, 0))
+        self.btn_copy = ttk.Button(bf, text="Copiar enlace", command=self.copy)
+        self.btn_copy.pack(side="left")
+        self.btn_regen = ttk.Button(bf, text="Generar token nuevo", command=self.regen)
+        self.btn_regen.pack(side="left", padx=8)
+        self.msg = ttk.Label(f, text="", wraplength=520, justify="left")
+        self.msg.pack(anchor="w", pady=(8, 0))
+        ttk.Label(f, style="Muted.TLabel", wraplength=520, justify="left", text=(
+            "Desde el celular se puede ver la conversación, mandar instrucciones, detener al agente y aceptar o denegar los "
+            "permisos que pida. No se puede cambiar el modo de permisos, la carpeta ni la configuración: eso sigue en esta PC.\n\n"
+            "Ojo: quien tenga el enlace puede hacer trabajar al agente en esta PC. La conexión es HTTP simple (sin cifrar); "
+            "no lo uses en redes Wi-Fi ajenas ni lo reenvíes. Si se filtró, «Generar token nuevo» lo invalida. "
+            "Windows puede preguntar si permitís a Python recibir conexiones: hay que aceptar en «red privada».")).pack(anchor="w", pady=(10, 0))
+        ttk.Button(f, text="Cerrar", command=w.destroy).pack(anchor="e", pady=(10, 0))
+        _place(w, app)
+        self.refresh()
+
+    def refresh(self):
+        srv = self.app.remote_srv
+        self.link_var.set(srv.link() if srv is not None else "")
+        state = "normal" if srv is not None else "disabled"
+        self.btn_copy.configure(state=state)
+        self.btn_regen.configure(state=state)
+
+    def _say(self, text, error=False):
+        self.msg.configure(text=text, style="Err.TLabel" if error else "Ok.TLabel")
+
+    def toggle(self):
+        ok, msg = self.app.set_remote(self.on_var.get())
+        if not ok:
+            self.on_var.set(False)
+            self._say(msg, error=True)
+        else:
+            self._say("Encendido: escuchando en el puerto %s." % self.app.cfg["remote_port"] if self.on_var.get() else "Apagado.")
+        self.refresh()
+
+    def copy(self):
+        self.app.copy_text(self.link_var.get())
+        self._say("Enlace copiado.")
+
+    def regen(self):
+        ok, msg = self.app.regenerate_remote_token()
+        self._say("Token nuevo generado: el enlace anterior ya no sirve." if ok else msg, error=not ok)
+        self.refresh()
 
 
 # ---------------------------------------------------------------- desbloquear la key guardada con contraseña

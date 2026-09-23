@@ -407,6 +407,9 @@ class Config:
         "win_geometry": "",      # "ANCHOxALTO+X+Y" de la ventana en estado normal
         "win_zoomed": False,
         "token_budget": 1000000, # 100% de la barra de consumo acumulado del medidor
+        "remote_enabled": False, # acceso desde el celular (remote.py); apagado salvo que el usuario lo encienda
+        "remote_port": 8765,
+        "remote_token": "",      # se genera al encender por primera vez
     }
 
     def __init__(self, directory=None):

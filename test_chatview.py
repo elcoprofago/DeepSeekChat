@@ -15,7 +15,7 @@ def check(nombre, cond, detalle=""):
 
 
 TEMA = dict(bg="#fff", panel="#fff", fg="#000", muted="#666", user="#06c", bot="#080", code_bg="#eee",
-            reason="#888", accent="#06c", accent_fg="#fff", err="#c00", border="#ccc")
+            reason="#888", accent="#06c", accent_fg="#fff", err="#c00", border="#ccc", final="#0aa")
 
 # ---- funciones puras
 msg = dsapi.build_message("Hola mundo", [__file__, __file__])
@@ -99,6 +99,30 @@ clic()
 check("el clic alterna elide", int(cv.text.tag_cget(bd, "elide")) != antes, (antes, cv.text.tag_cget(bd, "elide")))
 clic()
 check("y un segundo clic lo devuelve", int(cv.text.tag_cget(bd, "elide")) == antes)
+
+# ---- la conclusión (paso sin herramientas) lleva su color; el resto del trabajo, no
+def color_en(fragmento):
+    i = cv.text.search(fragmento, "1.0", elide=True)
+    return i, [g for g in cv.text.tag_names(i) if g == "final"] if i else None
+
+
+i, tg = color_en("Fin ")
+check("EFECTO: el texto del mensaje final (sin herramientas) tiene el tag de conclusión", tg == ["final"], tg)
+check("y ese tag pinta en el color del tema", cv.text.tag_cget("final", "foreground") == TEMA["final"], cv.text.tag_cget("final", "foreground"))
+i, tg = color_en("negrita")
+check("la negrita dentro de la conclusión conserva el color", "final" in cv.text.tag_names(i) and "bold" in cv.text.tag_names(i), cv.text.tag_names(i))
+i, tg = color_en("Voy a mirar.")
+check("CONTROL: la narración de un paso CON herramientas NO es conclusión", tg == [], tg)
+i, tg = color_en("PENSAMIENTO_SECRETO_UNO")
+check("CONTROL: el razonamiento tampoco", tg == [], tg)
+i, tg = color_en("list_dir")
+check("CONTROL: el log de herramientas tampoco", tg == [], tg)
+cv.clear()
+cv.assistant_body("", "en vivo, sin herramientas", final=True)
+check("en vivo (assistant_body con final=True) también se pinta", "final" in cv.text.tag_names(cv.text.search("en vivo", "1.0")))
+cv.clear()
+cv.assistant_body("", "narración intermedia")
+check("CONTROL: sin final=True no se pinta", "final" not in cv.text.tag_names(cv.text.search("narración", "1.0")))
 
 # ---- streaming: el paso en curso se borra sin comerse el encabezado
 cv.clear()

@@ -21,6 +21,7 @@ import explorer
 import localmodels
 import meter
 import prompts
+import remote
 import sessions
 import theme
 
@@ -88,6 +89,11 @@ class App:
         self._dialog = None
         self._server = None
         self._server_key = None
+        self.remote_srv = None
+        self._live = {"content": "", "rlen": 0}      # el paso en curso, para quien mira por el celular
+        self._pending_confirm = None
+        self._confirm_seq = 0
+        self._can_continue = False
         self.last_usage = None
         self.balance_text = "—"
         self._suppress_select = False
@@ -115,6 +121,23 @@ class App:
     def post(self, fn):
         """Se puede llamar desde cualquier hilo; fn corre en el hilo de la ventana."""
         self._ui.put(fn)
+
+    def call_ui(self, fn, timeout=8):
+        """Corre fn en el hilo de la ventana desde otro hilo y devuelve su resultado (o relanza su excepción)."""
+        ev, box = threading.Event(), {}
+
+        def run():
+            try:
+                box["r"] = fn()
+            except Exception as e:                  # noqa: BLE001 — se le devuelve al que llamó
+                box["e"] = e
+            ev.set()
+        self._ui.put(run)
+        if not ev.wait(timeout):
+            raise TimeoutError("la ventana no respondió")
+        if "e" in box:
+            raise box["e"]
+        return box["r"]
 
     def _drain_ui(self):
         try:
@@ -163,6 +186,8 @@ class App:
         self.appr_cb.pack(side="left", padx=(4, 0))
         self.appr_cb.bind("<<ComboboxSelected>>", lambda e: self.on_approval_change())
         ttk.Button(top, text="⚙ Configuración", command=self.open_settings).pack(side="right")
+        self.btn_remote = ttk.Button(top, text="📱 Remoto", command=self.open_remote)
+        self.btn_remote.pack(side="right", padx=6)
         ttk.Button(top, text="Exportar", command=self.export_current).pack(side="right", padx=6)
         self.btn_undo = ttk.Button(top, text="Deshacer cambio", command=self.undo)
         self.btn_undo.pack(side="right")
@@ -357,6 +382,10 @@ class App:
         for w in self.store.warnings:
             self.chat.note(w, error=True)
         self._key_prompt()
+        if self.cfg["remote_enabled"]:
+            ok, msg = self.start_remote()
+            if not ok:
+                self.chat.note(msg, error=True)
         self.refresh_models()
         self.refresh_balance()
         threading.Thread(target=self._scan_thread, daemon=True).start()
@@ -872,6 +901,94 @@ class App:
         else:
             self.send()
 
+    # ------------------------------------------------------------ acceso remoto (celular)
+
+    def remote_status(self):
+        if self.busy:
+            txt = self.state_lbl.cget("text")
+            return txt or "Trabajando…"
+        return "Listo"
+
+    def remote_send(self, text):
+        if self.busy:
+            return False, "El agente está trabajando: esperá o detenelo."
+        e = self._entry_for(self.sess.model)
+        if e["kind"] == "remote" and not self.cfg.api_key:
+            return False, "Falta la API key en la PC (o está bloqueada con contraseña)."
+        self.send(text, keep_draft=True)         # keep_draft: no toca lo que la persona tenga escrito en la PC
+        return True, ""
+
+    def remote_cancel(self):
+        if not self.busy:
+            return False, "No hay nada en curso."
+        self.cancel()
+        return True, ""
+
+    def remote_continue(self):
+        if self.busy or not self._can_continue:
+            return False, "No hay nada para continuar."
+        self.continue_run()
+        return True, ""
+
+    def remote_confirm(self, cid, allow):
+        p = self._pending_confirm
+        if p is None or p["id"] != cid:
+            return False, "Ese permiso ya se respondió (o venció)."
+        res = "allow" if allow else "deny"
+        d = self._dialog
+        if d is not None:
+            d.answer(res)                        # cierra también la ventana de la PC
+        else:
+            p["done"](res)
+        return True, ""
+
+    def start_remote(self):
+        """Enciende el servidor. Devuelve (ok, mensaje). Genera el token la primera vez."""
+        if self.remote_srv is not None:
+            return True, ""
+        if not self.cfg["remote_token"]:
+            self.cfg["remote_token"] = remote.new_token()
+        srv = remote.RemoteServer(remote.AppBridge(self), self.cfg["remote_token"], int(self.cfg["remote_port"]))
+        try:
+            srv.start()
+        except OSError as e:
+            return False, f"No se pudo abrir el puerto {self.cfg['remote_port']}: {e}"
+        self.remote_srv = srv
+        return True, ""
+
+    def stop_remote(self):
+        if self.remote_srv is not None:
+            self.remote_srv.stop()
+            self.remote_srv = None
+
+    def set_remote(self, enabled):
+        """Enciende o apaga y lo deja guardado. Devuelve (ok, mensaje)."""
+        if enabled:
+            ok, msg = self.start_remote()
+        else:
+            self.stop_remote()
+            ok, msg = True, ""
+        self.cfg["remote_enabled"] = bool(enabled and ok)
+        try:
+            self.cfg.save()
+        except OSError as e:
+            return False, f"No se pudo guardar la configuración: {e}"
+        return ok, msg
+
+    def regenerate_remote_token(self):
+        """Invalida el enlace anterior (p. ej. si se compartió por error)."""
+        self.cfg["remote_token"] = remote.new_token()
+        was_on = self.remote_srv is not None
+        self.stop_remote()
+        try:
+            self.cfg.save()
+        except OSError:
+            pass
+        return self.start_remote() if was_on else (True, "")
+
+    def open_remote(self):
+        dialogs.RemoteDialog(self)
+
     def _local_server(self):
         exe = localmodels.find_llama_server(self.cfg["llama_server_path"])
         if not exe:
@@ -885,6 +1002,7 @@ class App:
         return self._server
 
     def _show_continue(self, show):
+        self._can_continue = bool(show)
         if show:
             self.btn_continue.pack(side="left", anchor="s", padx=(8, 0), before=self.btn_send)
         else:
@@ -1015,14 +1133,22 @@ class App:
     def _confirm(self, kind, title, detail):
         """Corre en el hilo del agente: pide permiso en la ventana y espera la respuesta sin bloquear la interfaz."""
         ev, box = threading.Event(), {}
+        self._confirm_seq += 1
+        pending = {"id": self._confirm_seq, "kind": kind, "title": title, "detail": detail}
 
         def done(r):
+            if "r" in box:                  # la PC y el celular pueden responder a la vez: gana la primera
+                return
             box["r"] = r
+            if self._pending_confirm is pending:
+                self._pending_confirm = None
             ev.set()
+        pending["done"] = done
 
         def show():
             try:
                 self._dialog = dialogs.ConfirmDialog(self, kind, title, detail, done)
+                self._pending_confirm = pending
             except tk.TclError:
                 done("deny")
         self.post(show)
@@ -1050,12 +1176,17 @@ class App:
     def _handle(self, kind, *a):
         c = self.chat
         if kind == "step_begin":
+            self._live = {"content": "", "rlen": 0}
             self.meter.step_begin()
             c.assistant_header(self._label())
             c.begin_stream()
             self._set_state("Pensando…")
         elif kind in ("reasoning", "content"):
             c.stream_piece(kind, a[0])
+            if kind == "content":
+                self._live["content"] = (self._live["content"] + a[0])[-6000:]
+            else:
+                self._live["rlen"] += len(a[0])
             self.meter.piece(a[0])
             self._set_state("Razonando…" if kind == "reasoning" else "Escribiendo…")
         elif kind == "usage":
@@ -1065,9 +1196,10 @@ class App:
         elif kind == "step_end":
             p = a[0]
             self.meter.step_end()
+            self._live = {"content": "", "rlen": 0}
             c.clear_stream()
             note = "⚠ La respuesta se cortó por el límite de tokens de salida (ajustable en Configuración)." if p.get("finish") == "length" else None
-            c.assistant_body(p.get("reasoning", ""), p.get("content", ""), note)
+            c.assistant_body(p.get("reasoning", ""), p.get("content", ""), note, final=not p.get("calls"))
         elif kind == "tool_start":
             c.tool_call(a[1], a[2])
             self._set_state(f"Ejecutando {a[1]}…")
@@ -1088,6 +1220,7 @@ class App:
     def _run_finished(self, outcome, error, restore):
         c = self.chat
         c.clear_stream()
+        self._live = {"content": "", "rlen": 0}
         self.meter.step_end()          # un paso cortado por un error de red no se pierde del acumulado
         self._dismiss_dialog()
         if restore:
@@ -1155,6 +1288,7 @@ class App:
             self.cfg.save()
         except (tk.TclError, OSError):
             pass
+        self.stop_remote()
         if self._server is not None:
             self._server.stop()
         try:

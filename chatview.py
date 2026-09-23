@@ -78,6 +78,7 @@ class ChatView:
         c.tag_configure("note", foreground=t["muted"], font=("Segoe UI", fs - 1, "italic"))
         c.tag_configure("error", foreground=t["err"], font=("Segoe UI", fs, "bold"))
         c.tag_configure("reason", foreground=t["reason"], font=("Segoe UI", fs - 1, "italic"))
+        c.tag_configure("final", foreground=t["final"])      # la respuesta definitiva, aparte del log de trabajo
         c.tag_configure("rtoggle", foreground=t["reason"], font=("Segoe UI", fs - 1, "italic", "underline"))
         c.tag_configure("bold", font=("Segoe UI", fs, "bold"))
         c.tag_configure("inline", font=("Consolas", fs), background=t["code_bg"])
@@ -140,11 +141,11 @@ class ChatView:
             else:
                 self.put(tok, *base)
 
-    def markdown(self, text):
+    def markdown(self, text, base=()):
         pos = 0
         for m in FENCE.finditer(text):
             if m.start() > pos:
-                self._inline(text[pos:m.start()])
+                self._inline(text[pos:m.start()], base)
             lang, code = m.group(1).strip(), m.group(2).rstrip("\n")
             c = self.text
             c.configure(state="normal")
@@ -158,7 +159,7 @@ class ChatView:
             self.put(code + "\n", "code")
             pos = m.end()
         if pos < len(text):
-            self._inline(text[pos:])
+            self._inline(text[pos:], base)
 
     # ------------------------------------------------------------ bloques plegables
 
@@ -192,11 +193,12 @@ class ChatView:
             self.put(f"\n{label}\n", "hdr_bot")
         self._last_role = "assistant"
 
-    def assistant_body(self, reasoning, content, note=None):
+    def assistant_body(self, reasoning, content, note=None, final=False):
+        """final=True: el paso no llamó a ninguna herramienta, así que su texto es la conclusión y va con su color."""
         if reasoning:
             self.reasoning_block(reasoning)
         if content:
-            self.markdown(content)
+            self.markdown(content, ("final",) if final else ())
             self.put("\n")
         if note:
             self.put(note + "\n", "note")
@@ -251,7 +253,7 @@ class ChatView:
                 self.user(text, files)
             elif role == "assistant":
                 self.assistant_header(label)
-                self.assistant_body(m.get("_reasoning", ""), m.get("content") or "")
+                self.assistant_body(m.get("_reasoning", ""), m.get("content") or "", final=not m.get("tool_calls"))
                 for c in m.get("tool_calls") or []:
                     name, raw = c["function"]["name"], c["function"]["arguments"]
                     try:
