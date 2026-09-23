@@ -161,6 +161,13 @@ class App:
         # --- columna del chat
         self.chat = chatview.ChatView(self.col, self.copy_text)
         self.attach_bar = ttk.Frame(self.col, padding=(0, 4, 0, 0))
+        self.folder_bar = ttk.Frame(self.col, padding=(0, 6, 0, 0))
+        self.btn_folder = ttk.Button(self.folder_bar, text="📁 Abrir carpeta…", command=self.open_folder)
+        self.btn_folder.pack(side="left")
+        self.folder_lbl = ttk.Label(self.folder_bar, text="", anchor="w")
+        self.folder_lbl.pack(side="left", padx=8, fill="x", expand=True)
+        self.btn_clear = ttk.Button(self.folder_bar, text="Limpiar avisos", command=self.clear_notices)
+        self.btn_clear.pack(side="right")
         self.bottom = ttk.Frame(self.col, padding=(0, 6, 0, 4))
         self.btn_plus = ttk.Button(self.bottom, text="+", width=3, command=self.add_files)
         self.btn_plus.pack(side="left", anchor="s", padx=(0, 8))
@@ -183,6 +190,7 @@ class App:
         self.status.pack(side="bottom", fill="x")
         self.bottom.pack(side="bottom", fill="x")
         self.attach_bar.pack(side="bottom", fill="x")
+        self.folder_bar.pack(side="bottom", fill="x")
         self.chat.frame.pack(fill="both", expand=True)
         self.main.pack(fill="both", expand=True, padx=10)
         self.root.after(50, self._place_sash)
@@ -415,6 +423,7 @@ class App:
         self.last_usage = None
         self._make_toolbox()
         self.explorer.set_root(s.workspace if os.path.isdir(s.workspace or "") else "")
+        self._update_folder_bar()
         self._refresh_model_widgets()
         self.appr_var.set(APPROVALS.get(s.approval, APPROVALS["ask"]))
         self.chat.render_session(s.messages, self._label())
@@ -611,6 +620,7 @@ class App:
             self.sess.workspace = path
             self._make_toolbox()
             self.explorer.set_root(path)
+            self._update_folder_bar()
             self._retitle()
             self.refresh_sessions()
             self.chat.note(f"Carpeta de trabajo: {path}")
@@ -619,6 +629,18 @@ class App:
             self._persist()
             self._activate(self._blank_session(path))
             self.chat.note(f"Sesión nueva con la carpeta: {path}")
+
+    def _update_folder_bar(self):
+        ws = self.sess.workspace if self.sess else ""
+        if ws and os.path.isdir(ws):
+            self.folder_lbl.configure(text="Carpeta: " + ws, style="TLabel")
+        else:
+            self.folder_lbl.configure(text="Sin carpeta abierta: el agente no puede ver tus archivos", style="Err.TLabel")
+
+    def clear_notices(self):
+        """Borra de la vista los avisos y errores (solo lo que se ve: el historial de la sesión no se toca)."""
+        self.chat.clear_tagged("aviso")
+        self.state_lbl.configure(text="", style="TLabel")
 
     def view_file(self, path):
         dialogs.FileViewer(self, path, lambda p: self.attach_paths([p]))

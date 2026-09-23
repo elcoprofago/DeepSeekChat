@@ -57,6 +57,59 @@ check("find_llama_server respeta la ruta configurada", srv_exe and srv_exe.lower
 check("find_llama_server con ruta mala no devuelve esa ruta", lm.find_llama_server("C:\\no\\existe\\llama-server.exe") != "C:\\no\\existe\\llama-server.exe")
 check("humaniza tamaños", lm.format_size(2383309920) == "2.2 GB" and lm.format_size(369358144) == "352 MB", (lm.format_size(2383309920), lm.format_size(369358144)))
 
+# --- memoria: falla clara ANTES de lanzar, y explicación si llama-server muere por falta de memoria
+GB = 1024 * MB
+real = lm.memory_status()
+check("memory_status mide algo coherente", real and 0 < real["commit_libre"] and real["ram_libre"] <= real["ram_total"], real)
+modelo_grande = mk("G/grande-32b.gguf", size=18 * GB + 500 * MB)   # archivo disperso: no ocupa disco real
+falso_exe = mk("bin/llama-server.exe", size=1000)                  # nunca se ejecuta: el chequeo corta antes
+orig_status = lm.memory_status
+try:
+    lm.memory_status = lambda: {"ram_libre": 24 * GB, "ram_total": 47 * GB, "commit_libre": 4 * GB}
+    srv_falso = lm.LocalServer(falso_exe, os.path.join(d, "logs_falso"), ctx=2048)
+    try:
+        srv_falso.ensure(modelo_grande)
+        e = None
+    except lm.LocalError as ex:
+        e = str(ex)
+    check("poco commit libre: LocalError antes de lanzar, con las cifras en GB", e is not None and "18.5 GB" in e and "4.0 GB" in e and "24.0 GB" in e and srv_falso.proc is None, e)
+    lm.memory_status = lambda: {"ram_libre": 24 * GB, "ram_total": 47 * GB, "commit_libre": 40 * GB}
+    try:
+        lm.check_memory(modelo_grande)
+        e = None
+    except lm.LocalError as ex:
+        e = ex
+    check("CONTROL: con commit de sobra el chequeo deja pasar", e is None, e)
+    lm.memory_status = lambda: None
+    try:
+        lm.check_memory(modelo_grande)
+        e = None
+    except lm.LocalError as ex:
+        e = ex
+    check("si no se puede medir la memoria, no bloquea", e is None, e)
+    # llama-server que arranca y muere con el error de memoria: el mensaje debe explicar la causa real
+    bat = os.path.join(d, "bin2", "llama-server.bat")
+    os.makedirs(os.path.dirname(bat), exist_ok=True)
+    open(bat, "w").write("@echo off\r\necho llama_model_load: error loading model: unable to allocate CPU_REPACK buffer\r\nexit /b 1\r\n")
+    pequeno = mk("P/chico.gguf", size=3 * MB)
+    lm.memory_status = lambda: {"ram_libre": 24 * GB, "ram_total": 47 * GB, "commit_libre": 40 * GB}   # pasa el chequeo previo
+    srv_bat = lm.LocalServer(bat, os.path.join(d, "logs_bat"), ctx=2048)
+    try:
+        srv_bat.ensure(pequeno, timeout=30)
+        e = None
+    except lm.LocalError as ex:
+        e = str(ex)
+    check("muere por 'unable to allocate': el mensaje explica memoria comprometida y conserva el log", e is not None and "memoria comprometida" in e and "CPU_REPACK" in e, e)
+    open(bat, "w").write("@echo off\r\necho tensor 'x' has wrong shape\r\nexit /b 1\r\n")
+    try:
+        srv_bat.ensure(pequeno, timeout=30)
+        e = None
+    except lm.LocalError as ex:
+        e = str(ex)
+    check("CONTROL: otra causa de muerte NO se atribuye a la memoria", e is not None and "memoria comprometida" not in e and "wrong shape" in e, e)
+finally:
+    lm.memory_status = orig_status
+
 MODEL = r"E:\Models\Nvidia\Qwen2.5-0.5B-Instruct-Q3_K_L.gguf"
 if not os.path.isfile(MODEL) or not srv_exe:
     print("(se omite la parte del servidor real: falta el modelo o llama-server)")

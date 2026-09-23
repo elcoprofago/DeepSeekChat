@@ -158,6 +158,34 @@ check("tokens acumulados", app.sess.totals["in"] == 100 and app.sess.totals["out
 check("botón vuelve a Enviar", app.btn_send.cget("text") == "Enviar" and not app.busy)
 check("título automático desde el primer mensaje", app.sess.title == "hola", app.sess.title)
 
+# ---------------------------------------------------------------- Limpiar avisos + barra de carpeta siempre visible
+app.chat.note("✖ un error viejo que no sirve", error=True)
+app.chat.note("un aviso cualquiera")
+app._set_state("estado de prueba", error=True)
+antes = app.chat.get_text()
+app.btn_clear.invoke()
+despues = app.chat.get_text()
+check("premisa: los avisos estaban en pantalla", "un error viejo" in antes and "un aviso cualquiera" in antes)
+check("EFECTO: Limpiar avisos borra errores y avisos de la vista", "un error viejo" not in despues and "un aviso cualquiera" not in despues, despues[-200:])
+check("Limpiar avisos borra también el estado de la barra", app.state_lbl.cget("text") == "", app.state_lbl.cget("text"))
+check("CONTROL: Limpiar avisos deja la conversación (mensaje y respuesta)", "hola" in despues and "en qué te ayudo" in despues, despues[-300:])
+check("CONTROL: el historial de la sesión no se tocó", len(app.sess.messages) >= 2 and not ag.validate(app.sess.messages))
+app.root.update()
+check("la barra de carpeta está a la vista, con el botón Abrir carpeta…", app.btn_folder.winfo_viewable() and app.btn_folder.winfo_height() > 1 and "Abrir carpeta" in app.btn_folder.cget("text"))
+check("sin carpeta: la barra lo dice", "Sin carpeta" in app.folder_lbl.cget("text"), app.folder_lbl.cget("text"))
+elegida = os.path.join(tmp, "elegida_con_boton")
+os.makedirs(elegida)
+_askdir = dc.filedialog.askdirectory
+dc.filedialog.askdirectory = lambda **kw: elegida
+try:
+    app.btn_folder.invoke()          # el botón real, no la función
+finally:
+    dc.filedialog.askdirectory = _askdir
+check("EFECTO: el botón abre la carpeta elegida (sesión nueva: la actual tiene historia)", app.sess.workspace == elegida and app.toolbox is not None and app.sess.id != sid_libre, app.sess.workspace)
+check("con carpeta: la barra muestra la ruta", elegida in app.folder_lbl.cget("text"), app.folder_lbl.cget("text"))
+app._activate(app.store.load(sid_libre))
+check("al volver a la sesión sin carpeta, la barra vuelve a avisarlo", "Sin carpeta" in app.folder_lbl.cget("text"), app.folder_lbl.cget("text"))
+
 # ---------------------------------------------------------------- carpeta: sesión con historia => sesión nueva
 app.use_folder(ws)
 check("carpeta en sesión con historia: crea sesión nueva", app.sess.id != sid_libre and app.sess.workspace == ws and not app.sess.messages)

@@ -130,6 +130,18 @@ cv.clear_tagged("nk")
 t = cv.get_text()
 check("clear_tagged borra solo lo marcado", "aviso" not in t and "otro" in t, t)
 
+# ---- notas y errores llevan el tag "aviso" (lo que borra «Limpiar avisos»)
+cv.clear()
+cv.user("mi pregunta", [])
+cv.put("📎 adjunto.txt\n", "note")             # una línea de adjunto usa el mismo estilo pero NO es un aviso
+cv.note("una nota")
+cv.note("✖ un error", error=True)
+cv.assistant_body("", "respuesta del modelo")
+cv.clear_tagged("aviso")
+t = cv.get_text()
+check("clear_tagged('aviso') borra notas y errores", "una nota" not in t and "un error" not in t, t)
+check("CONTROL: no borra pregunta, respuesta ni la línea de adjunto", "mi pregunta" in t and "respuesta del modelo" in t and "adjunto.txt" in t, t)
+
 # ---- copiar
 cv.clear()
 cv.markdown("```js\nlet a = 1\n```")

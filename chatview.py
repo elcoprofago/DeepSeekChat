@@ -116,7 +116,7 @@ class ChatView:
         return self.text.get("1.0", "end")
 
     def note(self, text, error=False, *extra_tags):
-        self.put(text + "\n", "error" if error else "note", *extra_tags)
+        self.put(text + "\n", "error" if error else "note", "aviso", *extra_tags)
 
     def clear_tagged(self, tag):
         """Borra lo marcado con un tag (de atrás hacia adelante para no correr los índices)."""

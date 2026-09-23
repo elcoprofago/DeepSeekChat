@@ -24,6 +24,54 @@ class LocalError(Exception):
     pass
 
 
+# ---------------------------------------------------------------- memoria: el límite real es el commit, no la RAM libre
+
+class _MEMSTATUS(ctypes.Structure):
+    _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+
+def memory_status():
+    """{'ram_libre', 'ram_total', 'commit_libre'} en bytes, o None si no se pudo medir.
+    commit_libre = límite de memoria comprometida menos lo ya comprometido: es lo que Windows deja reservar a un
+    programa nuevo, y puede ser muy chico aunque sobre RAM física (otros procesos reservan sin usar)."""
+    try:
+        st = _MEMSTATUS()
+        st.dwLength = ctypes.sizeof(_MEMSTATUS)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return None
+        return {"ram_libre": st.ullAvailPhys, "ram_total": st.ullTotalPhys, "commit_libre": st.ullAvailPageFile}
+    except (AttributeError, OSError):
+        return None
+
+
+def _gb(n):
+    return f"{n / 1024 ** 3:.1f} GB"
+
+
+def memory_message(name, size, mem):
+    return (f"El modelo «{name}» pesa {_gb(size)}, pero Windows solo puede reservar {_gb(mem['commit_libre'])} más de memoria "
+            f"(hay {_gb(mem['ram_libre'])} de RAM libre; el límite es la memoria comprometida, que otros programas ya ocuparon). "
+            "Opciones: cerrar programas grandes (emuladores, otros servidores de modelos), elegir un modelo más chico, "
+            "o ampliar el archivo de paginación de Windows.")
+
+
+def check_memory(model_path, mem=None):
+    """Lanza LocalError si el modelo seguro no puede cargarse por falta de memoria comprometida. Si no se puede medir, deja pasar."""
+    mem = mem or memory_status()
+    if not mem:
+        return
+    try:
+        size = os.path.getsize(model_path)
+    except OSError:
+        return
+    if mem["commit_libre"] < size * 1.02:
+        raise LocalError(memory_message(os.path.basename(model_path), size, mem))
+
+
 # ---------------------------------------------------------------- búsqueda
 
 def default_model_dirs(cfg=None):
@@ -174,6 +222,7 @@ class LocalServer:
             raise LocalError(f"No se encuentra llama-server.exe en {self.exe}")
         if not os.path.isfile(model_path):
             raise LocalError(f"No se encuentra el modelo {model_path} (¿está conectado el pendrive?)")
+        check_memory(model_path)
         os.makedirs(self.log_dir, exist_ok=True)
         self.port = _free_port()
         args = [self.exe, "-m", model_path, "--host", "127.0.0.1", "--port", str(self.port), "-c", str(ctx),
@@ -202,6 +251,10 @@ class LocalServer:
             if self.proc.poll() is not None:
                 tail = self._tail()
                 self.stop()
+                low = tail.lower()
+                mem = memory_status()
+                if mem and any(k in low for k in ("unable to allocate", "failed to allocate", "out of memory", "bad_alloc")):
+                    raise LocalError(memory_message(os.path.basename(model_path), os.path.getsize(model_path), mem) + "\n" + tail)
                 raise LocalError("llama-server terminó al arrancar (¿poca memoria o modelo incompatible?).\n" + tail)
             try:
                 with urllib.request.urlopen(url, timeout=2) as r:
