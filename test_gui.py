@@ -5,6 +5,7 @@ Uso: python test_gui.py [carpeta_capturas]
 import ctypes
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -21,6 +22,7 @@ import deepseek_chat as dc
 import dsapi
 import localmodels
 import sessions
+import theme
 
 SHOTS = sys.argv[1] if len(sys.argv) > 1 else ""
 if SHOTS:
@@ -341,7 +343,7 @@ check("clic de vuelta", app.sess.id == sid_a)
 app.rename_session(sid_a, "  Arreglo   de a.txt ")
 disco = sessions.SessionStore(cfg.sessions_dir).load(sid_a)
 check("renombrar: normaliza, guarda y actualiza lista y título",
-      disco.title == "Arreglo de a.txt" and app.sess_tree.set(sid_a, "title") == "Arreglo de a.txt" and "Arreglo de a.txt" in root.title(), (disco.title, root.title()))
+      disco.title == "Arreglo de a.txt" and app.sess_tree.set(sid_a, "title") == "Arreglo de a.txt" and root.title() == dc.TITULO_VENTANA, (disco.title, root.title()))
 
 out = os.path.join(tmp, "exp ñ.md")
 res = app.write_export(app.sess, out)
@@ -433,10 +435,62 @@ pump(t=0.3)
 check("boton de menu la vuelve a mostrar", str(app.side) in app.main.panes() and app.sidebar_visible)
 shot("03_final.png")
 
+# ---------------------------------------------------------------- título, medidor de tokens, tema oscuro
+check("título de la ventana como el de USBagent (y fijo aunque cambie la sesión)",
+      dc.TITULO_VENTANA == "DeepSeek Chat - \u00a9 R.A. Sistemas - 2026" and root.title() == dc.TITULO_VENTANA, root.title())
+check("el tema por defecto es el oscuro azul", dsapi.Config.DEFAULTS["theme"] == "oscuro"
+      and all(k in theme.THEMES[n] for n in theme.THEMES for k in ("meter_fill", "accent_text")))
+
+
+def texto_canvas(cv):
+    return " ".join(str(cv.itemcget(i, "text")) for i in cv.find_all() if cv.type(i) == "text")
+
+
+app.meter.reset()
+app._draw_meter()
+check("medidor en reposo: 'Listo' y consumo 0", "Listo" in texto_canvas(app.cv_state) and "Jornada: 0 tok" in texto_canvas(app.cv_bar),
+      (texto_canvas(app.cv_state), texto_canvas(app.cv_bar)))
+app._handle("step_begin")
+for _ in range(3):
+    app._handle("content", "x" * 70)
+    time.sleep(0.25)
+app._draw_meter()
+check("medidor generando: muestra velocidad estimada con '~' y total estimado",
+      "Generando" in texto_canvas(app.cv_state) and "~" in texto_canvas(app.cv_state) and "tok/s" in texto_canvas(app.cv_state)
+      and "Jornada: ~" in texto_canvas(app.cv_bar), (texto_canvas(app.cv_state), texto_canvas(app.cv_bar)))
+app._handle("usage", {"prompt_tokens": 4000, "completion_tokens": 60})
+app._handle("step_end", {"content": "x", "reasoning": "", "finish": "stop", "calls": []})
+app._draw_meter()
+check("con el usage exacto: total 4.060 sin '~' y la barra tiene relleno",
+      "Jornada: 4.060 tok" in texto_canvas(app.cv_bar).replace(",", ".") and "~" not in texto_canvas(app.cv_bar)
+      and any(app.cv_bar.type(i) == "rectangle" for i in app.cv_bar.find_all()), texto_canvas(app.cv_bar))
+app._meter_reset()
+check("reiniciar el contador lo pone en cero", app.meter.total() == 0 and "Jornada: 0 tok" in texto_canvas(app.cv_bar))
+
+# ---------------------------------------------------------------- geometría: se recuerda y se corrige si el monitor cambió
+V = (0, 0, 1920, 1080)
+V2 = (-1920, 0, 3840, 1080)          # un segundo monitor a la izquierda
+check("fit_geometry: dentro de la pantalla no se toca", dc.fit_geometry("1000x700+100+50", V) == "1000x700+100+50")
+check("fit_geometry: fuera de la pantalla (monitor desconectado) se trae adentro", dc.fit_geometry("1000x700+2500+900", V) == "1000x700+920+380")
+check("CONTROL: la misma posición es válida si el monitor extra sigue", dc.fit_geometry("1000x700+-1500+100", V2) == "1000x700+-1500+100")
+check("fit_geometry: más grande que la pantalla se recorta", dc.fit_geometry("3000x2000+0+0", V) == "1920x1080+0+0")
+check("fit_geometry: tamaño diminuto se sube al mínimo", dc.fit_geometry("100x100+0+0", V) == "860x520+0+0")
+check("fit_geometry: basura o vacío -> None", dc.fit_geometry("", V) is None and dc.fit_geometry("hola", V) is None)
+
+# ---------------------------------------------------------------- permisos y effort por defecto para sesiones nuevas
+app._set_approval("edits")
+check("permiso 'edits' se recuerda para sesiones nuevas", dsapi.Config(os.path.join(tmp, "cfg"))["approval"] == "edits"
+      and app._blank_session("").approval == "edits")
+app.cfg["approval"] = "all"
+check("'all' NUNCA se hereda: sesión nueva vuelve a 'ask'", app._blank_session("").approval == "ask")
+app.cfg["approval"] = "ask"
+
 # ---------------------------------------------------------------- cierre: guarda y recuerda
 sid_final = app.sess.id
 app.on_close()
 c2 = dsapi.Config(os.path.join(tmp, "cfg"))
+check("al cerrar recuerda geometría, maximizado y barra lateral", re.match(r"^\d+x\d+\+-?\d+\+-?\d+$", c2["win_geometry"]) is not None
+      and c2["win_zoomed"] is False and c2["sidebar_visible"] is True, (c2["win_geometry"], c2["win_zoomed"], c2["sidebar_visible"]))
 check("al cerrar, la config recuerda la última sesión y el ancho de la barra", c2["last_session"] == sid_final and c2["sidebar_w"] >= 160, (c2["last_session"], c2["sidebar_w"]))
 
 shutil.rmtree(tmp, ignore_errors=True)

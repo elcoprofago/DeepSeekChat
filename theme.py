@@ -4,10 +4,11 @@ from tkinter import ttk
 THEMES = {
     "claro": dict(bg="#f2f4f7", panel="#ffffff", fg="#1c2733", muted="#66727f", user="#0b5cad",
                   bot="#17743f", code_bg="#eceff3", reason="#8a94a0", accent="#0b5cad",
-                  accent_fg="#ffffff", err="#b3261e", border="#d3d9e0"),
-    "oscuro": dict(bg="#1a1e23", panel="#232930", fg="#e4e8ec", muted="#93a0ad", user="#6cb2ff",
-                   bot="#6fd39a", code_bg="#1a1e23", reason="#7d8895", accent="#3a86d6",
-                   accent_fg="#ffffff", err="#ff8a80", border="#37404a"),
+                  accent_fg="#ffffff", err="#b3261e", border="#d3d9e0", accent_text="#0b5cad", meter_fill="#b6d3f2"),
+    # Azul nocturno estilo VSCode: tres capas de azul (ventana < paneles < campos) y acentos en azul claro / cian.
+    "oscuro": dict(bg="#14202e", panel="#1c2d42", fg="#d4e1f0", muted="#8aa1bb", user="#5cb3ff",
+                   bot="#4fd1c5", code_bg="#0d1826", reason="#7f96b0", accent="#0e639c",
+                   accent_fg="#ffffff", err="#f48771", border="#2c4260", accent_text="#6cb6ff", meter_fill="#0e639c"),
 }
 
 

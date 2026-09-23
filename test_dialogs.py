@@ -257,6 +257,35 @@ try:
     s.save_options()
     check("max_tokens fuera de rango se acota", c4["max_tokens"] == 256, c4["max_tokens"])
     s.win.destroy()
+
+    # --- persistencia: cerrar guarda sin apretar «Guardar opciones»; lo local se guarda apenas cambia
+    s = dialogs.SettingsDialog(app4)
+    root.update()
+    n_temas, n_scans = app4.themes_applied, app4.rescans
+    s.theme_var.set("claro")
+    s.budget_var.set(2500000)
+    s.close()
+    root.update()
+    c6 = dsapi.Config()
+    check("cerrar sin guardar: el tema y el presupuesto quedan en disco", c6["theme"] == "claro" and c6["token_budget"] == 2500000, (c6["theme"], c6["token_budget"]))
+    check("cerrar con el tema cambiado lo aplica; sin cambios locales no reescanea", app4.themes_applied == n_temas + 1 and app4.rescans == n_scans)
+    s = dialogs.SettingsDialog(app4)
+    root.update()
+    n_temas = app4.themes_applied
+    s.close()
+    check("CONTROL: cerrar sin tocar nada no re-aplica nada", app4.themes_applied == n_temas)
+    s = dialogs.SettingsDialog(app4)
+    root.update()
+    falso_srv = os.path.join(tmp, "bin", "llama-server.exe")
+    os.makedirs(os.path.dirname(falso_srv), exist_ok=True)
+    open(falso_srv, "wb").write(b"x")
+    s.srv_var.set(falso_srv)
+    s.ctx_var.set(12288)
+    s._autosave_local()
+    c7 = dsapi.Config()
+    check("ruta del llama-server y contexto se guardan sin cerrar ni apretar nada", c7["llama_server_path"] == falso_srv and c7["local_ctx"] == 12288,
+          (c7["llama_server_path"], c7["local_ctx"]))
+    s.win.destroy()
 finally:
     dsapi.get_balance = real_balance
 

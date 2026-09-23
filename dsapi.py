@@ -392,7 +392,7 @@ class Config:
         "model": "deepseek-v4-pro",
         "effort": "",
         "system_prompt": "",
-        "theme": "claro",
+        "theme": "oscuro",
         "font_size": 11,
         "max_tokens": 32768,
         "api_key_enc": "",       # DPAPI: atada al usuario de Windows (modo instalado)
@@ -403,6 +403,10 @@ class Config:
         "last_session": "",
         "approval": "ask",       # ask | edits | all
         "sidebar_w": 260,
+        "sidebar_visible": True,
+        "win_geometry": "",      # "ANCHOxALTO+X+Y" de la ventana en estado normal
+        "win_zoomed": False,
+        "token_budget": 1000000, # 100% de la barra de consumo acumulado del medidor
     }
 
     def __init__(self, directory=None):

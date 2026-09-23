@@ -218,13 +218,41 @@ class SettingsDialog:
         bf = ttk.Frame(outer)
         bf.pack(fill="x", pady=(10, 0))
         ttk.Button(bf, text="Abrir carpeta de datos", command=self.open_data).pack(side="left")
-        ttk.Button(bf, text="Cerrar", command=w.destroy).pack(side="right")
+        ttk.Button(bf, text="Cerrar", command=self.close).pack(side="right")
         ttk.Button(bf, text="Guardar opciones", style="Accent.TButton", command=self.save_options).pack(side="right", padx=8)
-        self.opt_msg = ttk.Label(outer, text="", wraplength=560, justify="left")
+        self.opt_msg = ttk.Label(outer, text="Los cambios se guardan solos al cerrar esta ventana.", style="Muted.TLabel", wraplength=560, justify="left")
         self.opt_msg.pack(fill="x", pady=(6, 0))
+        w.protocol("WM_DELETE_WINDOW", self.close)
+        self._snap = self._snapshot()
         _place(w, app)
         w.grab_set()
         self.key_entry.focus_set()
+
+    APPEARANCE = ("theme", "font_size")
+    LOCAL = ("model_dirs", "llama_server_path", "local_ctx")
+    WATCH = APPEARANCE + LOCAL + ("max_tokens", "system_prompt", "token_budget")
+
+    def _snapshot(self):
+        return {k: self.app.cfg[k] for k in self.WATCH}
+
+    def close(self):
+        """Cerrar guarda lo que se haya tocado: no hace falta acordarse del botón «Guardar opciones»."""
+        if self.save_options(silent=True):
+            now = self._snapshot()
+            changed = {k for k in self.WATCH if now[k] != self._snap[k]}
+            if changed & set(self.APPEARANCE):
+                self.app.apply_theme()
+            if changed & set(self.LOCAL):
+                self.app.rescan_models()
+        self.win.destroy()
+
+    def _autosave_local(self):
+        """Los datos de modelos locales se guardan en cuanto cambian (antes solo con «Guardar opciones»)."""
+        self._apply_local()
+        try:
+            self.app.cfg.save()
+        except OSError:
+            pass
 
     # ------------------------------------------------------------ pestaña: API key
 
@@ -377,14 +405,19 @@ class SettingsDialog:
 
         ttk.Label(f, text="llama-server.exe (vacío = buscar junto al programa)").grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.srv_var = tk.StringVar(value=cfg["llama_server_path"])
-        ttk.Entry(f, textvariable=self.srv_var, width=58).grid(row=6, column=0, columnspan=2, sticky="we")
+        srv_entry = ttk.Entry(f, textvariable=self.srv_var, width=58)
+        srv_entry.grid(row=6, column=0, columnspan=2, sticky="we")
+        for ev in ("<FocusOut>", "<Return>"):
+            srv_entry.bind(ev, lambda e: (self._update_srv_state(), self._autosave_local()))
         ttk.Button(f, text="Examinar…", command=self.pick_server).grid(row=6, column=2, padx=(6, 0))
         self.srv_state = ttk.Label(f, text="", style="Muted.TLabel", wraplength=540, justify="left")
         self.srv_state.grid(row=7, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
         ttk.Label(f, text="Contexto del modelo local (tokens)").grid(row=8, column=0, sticky="w", pady=(10, 0))
         self.ctx_var = tk.IntVar(value=int(cfg["local_ctx"]))
-        ttk.Spinbox(f, from_=2048, to=131072, increment=2048, textvariable=self.ctx_var, width=9).grid(row=8, column=1, sticky="w", pady=(10, 0))
+        ctx_sp = ttk.Spinbox(f, from_=2048, to=131072, increment=2048, textvariable=self.ctx_var, width=9)
+        ctx_sp.grid(row=8, column=1, sticky="w", pady=(10, 0))
+        ctx_sp.bind("<FocusOut>", lambda e: self._autosave_local())
         ttk.Label(f, text="Más contexto = más memoria RAM. 16384 es un punto medio razonable.", style="Muted.TLabel").grid(
             row=9, column=0, columnspan=3, sticky="w")
         ttk.Button(f, text="Buscar modelos ahora", command=self.scan_now).grid(row=10, column=0, sticky="w", pady=(10, 0))
@@ -401,19 +434,22 @@ class SettingsDialog:
         d = filedialog.askdirectory(parent=self.win, title="Carpeta con modelos .gguf")
         if d and os.path.normpath(d) not in self.dirs.get(0, "end"):
             self.dirs.insert("end", os.path.normpath(d))
+            self._autosave_local()
 
     def remove_dir(self):
         for i in reversed(self.dirs.curselection()):
             self.dirs.delete(i)
+        self._autosave_local()
 
     def pick_server(self):
         p = filedialog.askopenfilename(parent=self.win, title="llama-server.exe", filetypes=[("llama-server", "llama-server.exe"), ("Todos", "*.*")])
         if p:
             self.srv_var.set(os.path.normpath(p))
             self._update_srv_state()
+            self._autosave_local()
 
     def scan_now(self):
-        self._apply_local()
+        self._autosave_local()
         found = self.app.rescan_models()
         self.scan_lbl.configure(text=f"{len(found)} modelo(s) encontrado(s)." if found else "No se encontró ningún modelo .gguf.")
         self._update_srv_state()
@@ -444,9 +480,12 @@ class SettingsDialog:
         ttk.Label(f, text="Tamaño de letra").grid(row=2, column=4)
         self.font_var = tk.IntVar(value=int(cfg["font_size"]))
         ttk.Spinbox(f, from_=8, to=22, textvariable=self.font_var, width=4).grid(row=2, column=5, padx=6)
+        ttk.Label(f, text="Presupuesto de tokens de la jornada (100% de la barra del medidor)").grid(row=3, column=0, columnspan=4, sticky="w", pady=(12, 0))
+        self.budget_var = tk.IntVar(value=int(cfg["token_budget"]))
+        ttk.Spinbox(f, from_=10000, to=100000000, increment=100000, textvariable=self.budget_var, width=11).grid(row=3, column=4, columnspan=2, sticky="w", pady=(12, 0), padx=6)
         ttk.Label(f, text=f"Datos (configuración, sesiones y copias de seguridad): {cfg.dir}"
                   + ("   [modo portable]" if cfg.portable else ""), style="Muted.TLabel", wraplength=540, justify="left").grid(
-            row=3, column=0, columnspan=6, sticky="w", pady=(14, 0))
+            row=4, column=0, columnspan=6, sticky="w", pady=(14, 0))
 
     # ------------------------------------------------------------ guardar
 
@@ -459,27 +498,35 @@ class SettingsDialog:
     def _opt(self, text, error=False):
         self.opt_msg.configure(text=text, style="Err.TLabel" if error else "Ok.TLabel")
 
-    def save_options(self):
+    def save_options(self, silent=False):
+        """Guarda todo lo de la ventana. Con silent=True (al cerrar) no muestra mensajes ni rehace la vista.
+        Devuelve True si quedó guardado."""
         c = self.app.cfg
         try:
             c["max_tokens"] = max(256, min(393216, int(self.max_var.get())))
             c["font_size"] = max(8, min(22, int(self.font_var.get())))
+            c["token_budget"] = max(10000, int(self.budget_var.get()))
         except (tk.TclError, ValueError):
-            self._opt("Tamaños inválidos.", error=True)
-            return
+            if not silent:
+                self._opt("Valores numéricos inválidos.", error=True)
+            return False
         c["theme"] = self.theme_var.get()
         c["system_prompt"] = self.sys_text.get("1.0", "end-1c")
         self._apply_local()
         try:
             c.save()
         except OSError as e:
-            self._opt(f"No se pudo guardar: {e}", error=True)
-            return
+            if not silent:
+                self._opt(f"No se pudo guardar: {e}", error=True)
+            return False
+        if silent:
+            return True
         self.app.apply_theme()
         self.restyle()
         found = self.app.rescan_models()
         self._update_srv_state()
         self._opt(f"Opciones guardadas. Modelos locales encontrados: {len(found)}.")
+        return True
 
     def open_data(self):
         os.makedirs(self.app.cfg.dir, exist_ok=True)

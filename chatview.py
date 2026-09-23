@@ -84,7 +84,7 @@ class ChatView:
         c.tag_configure("code", font=("Consolas", fs), background=t["code_bg"], lmargin1=16, lmargin2=16,
                         rmargin=16, spacing1=0, spacing3=0)
         c.tag_configure("codelang", foreground=t["muted"], font=("Consolas", fs - 2), background=t["code_bg"], lmargin1=16)
-        c.tag_configure("tool", foreground=t["accent"], font=("Consolas", fs - 1), lmargin1=14, lmargin2=28, spacing1=4)
+        c.tag_configure("tool", foreground=t.get("accent_text", t["accent"]), font=("Consolas", fs - 1), lmargin1=14, lmargin2=28, spacing1=4)
         c.tag_configure("toolres", foreground=t["muted"], font=("Consolas", fs - 1), lmargin1=28, lmargin2=28)
         c.tag_configure("toolbad", foreground=t["err"], font=("Consolas", fs - 1), lmargin1=28, lmargin2=28)
         c.tag_configure("tooltoggle", foreground=t["reason"], font=("Segoe UI", fs - 2, "italic", "underline"), lmargin1=28)

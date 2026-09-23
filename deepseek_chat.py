@@ -4,8 +4,10 @@ Toda la lógica del agente vive en agent.py / agent_tools.py; acá solo está la
 Regla de hilos: tkinter solo se toca desde el hilo principal. El hilo de trabajo deja lo que quiere mostrar en una
 cola (self.post) y _drain_ui lo ejecuta.
 """
+import ctypes
 import os
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -17,17 +19,46 @@ import dialogs
 import dsapi
 import explorer
 import localmodels
+import meter
 import prompts
 import sessions
 import theme
 
 TITULO = "DeepSeek Chat"
+TITULO_VENTANA = "DeepSeek Chat - © R.A. Sistemas - 2026"      # mismo formato que la ventana de USBagent
+GEOMETRIA_INICIAL = "1240x780"
 SIN_EFFORT = "(por defecto)"
 APPROVALS = {"ask": "Preguntar todo", "edits": "Editar sin preguntar", "all": "Todo sin preguntar"}
 MUTATING = {"write_file", "edit_file", "run_command"}
 REMOTE_BUDGET = 600000
 LOCAL_TIMEOUT = 900
 miles = chatview.miles
+
+
+def fit_geometry(geo, bounds, minw=860, minh=520):
+    """Una geometría guardada ("ANCHOxALTO+X+Y") ajustada para que la ventana quede visible dentro de bounds
+    (x, y, ancho, alto del escritorio virtual). None si lo guardado no sirve. Sirve para cuando cambia el monitor."""
+    m = re.match(r"^(\d+)x(\d+)\+(-?\d+)\+(-?\d+)$", geo or "")
+    if not m:
+        return None
+    w, h, x, y = (int(v) for v in m.groups())
+    bx, by, bw, bh = bounds
+    w, h = max(minw, min(w, bw)), max(minh, min(h, bh))
+    x = min(max(x, bx), bx + bw - w)
+    y = min(max(y, by), by + bh - h)
+    return f"{w}x{h}+{x}+{y}"
+
+
+def virtual_screen(root):
+    """(x, y, ancho, alto) de todo el escritorio, con todos los monitores; si Windows no lo informa, el monitor principal."""
+    try:
+        gm = ctypes.windll.user32.GetSystemMetrics
+        x, y, w, h = gm(76), gm(77), gm(78), gm(79)
+        if w > 0 and h > 0:
+            return x, y, w, h
+    except (AttributeError, OSError):
+        pass
+    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
 
 
 class App:
@@ -59,15 +90,22 @@ class App:
         self.balance_text = "—"
         self._suppress_select = False
         self._ui = queue.Queue()
+        self.meter = meter.TokenMeter()
 
-        root.title(TITULO)
-        root.geometry("1240x780")
+        root.title(TITULO_VENTANA)
+        root.geometry(fit_geometry(self.cfg["win_geometry"], virtual_screen(root)) or GEOMETRIA_INICIAL)
         root.minsize(860, 520)
+        if self.cfg["win_zoomed"]:
+            root.after(0, lambda: root.state("zoomed"))
         theme.apply_styles(root, self.t)
         self._build()
+        if not self.cfg["sidebar_visible"]:
+            self.main.forget(self.side)
+            self.sidebar_visible = False
         self.apply_theme()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._drain_ui()
+        self._meter_tick()
         self._startup()
 
     # ------------------------------------------------------------ puente hilos -> ventana
@@ -186,14 +224,88 @@ class App:
         self.state_lbl = ttk.Label(self.status, text="")
         self.state_lbl.pack(side="right", padx=14)
 
+        # medidor: estado + velocidad en vivo, y consumo acumulado de la jornada (mismo patrón que USBagent)
+        self.meter_bar = ttk.Frame(self.col, padding=(0, 4, 0, 6))
+        self.cv_state = tk.Canvas(self.meter_bar, width=260, height=24, highlightthickness=1, bd=0)
+        self.cv_state.pack(side="left")
+        self.cv_bar = tk.Canvas(self.meter_bar, height=24, highlightthickness=1, bd=0)
+        self.cv_bar.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.cv_bar.bind("<Configure>", lambda e: self._draw_meter())
+        self.cv_bar.bind("<Button-3>", self._meter_menu)
+        self.cv_state.bind("<Button-3>", self._meter_menu)
+
         # lo que siempre debe verse va abajo y se empaqueta primero; el chat se queda con lo que sobre
         self.status.pack(side="bottom", fill="x")
+        self.meter_bar.pack(side="bottom", fill="x")
         self.bottom.pack(side="bottom", fill="x")
         self.attach_bar.pack(side="bottom", fill="x")
         self.folder_bar.pack(side="bottom", fill="x")
         self.chat.frame.pack(fill="both", expand=True)
         self.main.pack(fill="both", expand=True, padx=10)
         self.root.after(50, self._place_sash)
+
+    # ------------------------------------------------------------ medidor de tokens
+
+    def _meter_tick(self):
+        try:
+            self._draw_meter()
+            self._meter_job = self.root.after(250, self._meter_tick)
+        except tk.TclError:
+            pass
+
+    def _meter_menu(self, e):
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label="Reiniciar el contador de la jornada", command=self._meter_reset)
+        m.tk_popup(e.x_root, e.y_root)
+
+    def _meter_reset(self):
+        self.meter.reset()
+        self._draw_meter()
+
+    def _draw_meter(self):
+        t, m = self.t, self.meter
+        cs = self.cv_state
+        cs.delete("all")
+        cs.configure(bg=t["panel"], highlightbackground=t["border"])
+        if m.generating():
+            dot, label = t["bot"], "Generando"
+        elif self.busy:
+            dot, label = "#e5c07b", "Trabajando…"
+        else:
+            dot, label = t["muted"], "Listo"
+        r = m.rate()
+        if r is None:
+            speed = ""
+        elif r[1]:
+            speed = f"  ~{r[0]:.0f} tok/s"
+        else:
+            speed = f"  {r[0]:.0f} tok/s" if m.generating() or self.busy else f"  última: {r[0]:.0f} tok/s"
+        cs.create_oval(9, 8, 17, 16, fill=dot, outline="")
+        cs.create_text(26, 12, text=label + speed, anchor="w", fill=t["fg"], font=("Segoe UI", 9))
+
+        cb = self.cv_bar
+        cb.delete("all")
+        cb.configure(bg=t["code_bg"], highlightbackground=t["border"])
+        w = max(1, cb.winfo_width() - 2)
+        budget = max(1, int(self.cfg["token_budget"]))
+        total = m.total()
+        frac = min(1.0, total / budget)
+        if frac > 0:
+            cb.create_rectangle(1, 1, 1 + w * frac, 24, fill=t["meter_fill"], outline="")
+        txt = f"Jornada: {'~' if m.estimated() else ''}{miles(total)} tok · {frac * 100:.0f}% de {miles(budget)}"
+        if m.acc_in or m.acc_out:
+            txt += f"   (entrada {miles(m.acc_in)} · salida {miles(m.acc_out)})"
+        cb.create_text(w / 2 + 1, 12, text=txt, fill=t["fg"], font=("Segoe UI", 9))
+
+    def _dark_titlebar(self):
+        """Barra de título oscura de Windows para el tema oscuro (Windows 10 1809+ / 11); si no se puede, no pasa nada."""
+        try:
+            self.root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            v = ctypes.c_int(1 if self.cfg["theme"] == "oscuro" else 0)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(v), ctypes.sizeof(v))
+        except (AttributeError, OSError, tk.TclError):
+            pass
 
     def _place_sash(self):
         try:
@@ -222,6 +334,8 @@ class App:
                              highlightcolor=t["accent"], font=("Segoe UI", fs))
         self.btn_send.configure(style="Accent.TButton")
         self.sess_tree.tag_configure("cur", font=("Segoe UI", 10, "bold"))
+        self._dark_titlebar()
+        self._draw_meter()
 
     # ------------------------------------------------------------ arranque
 
@@ -285,6 +399,11 @@ class App:
         if mid.startswith(localmodels.MODEL_ID_PREFIX):
             path = mid[len(localmodels.MODEL_ID_PREFIX):]
             base = os.path.basename(path)
+            if not os.path.isfile(path):
+                # el pendrive puede montarse con otra letra de unidad: el mismo archivo, hallado en otra carpeta
+                same = [m for m in self.local_models if os.path.basename(m["path"]).lower() == base.lower()]
+                if len(same) == 1:
+                    return {**same[0], "kind": "local", "efforts": [], "context": int(self.cfg["local_ctx"])}
             return {"id": mid, "kind": "local", "name": base[:-5] if base.lower().endswith(".gguf") else base, "path": path,
                     "size": 0, "efforts": [], "context": int(self.cfg["local_ctx"]), "missing": not os.path.isfile(path)}
         return {"id": mid, "kind": "remote", "name": mid, "efforts": [], "context": 0}
@@ -345,6 +464,8 @@ class App:
     def on_effort_change(self):
         v = self.effort_var.get()
         self.sess.effort = "" if v in (SIN_EFFORT, "—") else v
+        self.cfg["effort"] = self.sess.effort
+        self._save_cfg()
         self._persist()
 
     def refresh_models(self):
@@ -394,12 +515,26 @@ class App:
         self.appr_var.set(APPROVALS[val])
         if self.toolbox:
             self.toolbox.approval = val
+        if val in ("ask", "edits") and self.cfg["approval"] != val:
+            self.cfg["approval"] = val
+            self._save_cfg()
         self._persist()
 
     # ------------------------------------------------------------ sesiones
 
+    def _save_cfg(self):
+        try:
+            self.cfg.save()
+        except OSError:
+            pass
+
     def _blank_session(self, workspace):
-        return sessions.Session(workspace=workspace, model=self._default_model_id(), approval="ask")
+        """Sesión nueva con los últimos permisos y effort elegidos. «Todo sin preguntar» NO se hereda: es una decisión
+        por sesión (pide confirmación cada vez), así que una sesión nueva vuelve a «Preguntar todo»."""
+        model = self._default_model_id()
+        approval = self.cfg["approval"] if self.cfg["approval"] in ("ask", "edits") else "ask"
+        effort = self.cfg["effort"] if self.cfg["effort"] in (self._entry_for(model).get("efforts") or []) else ""
+        return sessions.Session(workspace=workspace, model=model, effort=effort, approval=approval)
 
     def _persist(self):
         """Guarda la sesión actual si tiene mensajes y está bien formada (cambios de modelo, permisos, nombre)."""
@@ -455,11 +590,7 @@ class App:
         return "DeepSeek" if e is None or e["kind"] == "remote" else e["name"]
 
     def _retitle(self):
-        s = self.sess
-        parts = [s.display_title]
-        if s.workspace:
-            parts.append(os.path.basename(s.workspace.rstrip("\\/")) or s.workspace)
-        self.root.title(" — ".join(parts) + " — " + TITULO)
+        self.root.title(TITULO_VENTANA)     # fijo (pedido del usuario); la sesión y la carpeta ya se ven en la barra lateral y bajo el chat
 
     def refresh_sessions(self):
         tree = self.sess_tree
@@ -901,17 +1032,21 @@ class App:
     def _handle(self, kind, *a):
         c = self.chat
         if kind == "step_begin":
+            self.meter.step_begin()
             c.assistant_header(self._label())
             c.begin_stream()
             self._set_state("Pensando…")
         elif kind in ("reasoning", "content"):
             c.stream_piece(kind, a[0])
+            self.meter.piece(a[0])
             self._set_state("Razonando…" if kind == "reasoning" else "Escribiendo…")
         elif kind == "usage":
             self.last_usage = a[0]
+            self.meter.usage(a[0])
             self._update_status_keep_busy()
         elif kind == "step_end":
             p = a[0]
+            self.meter.step_end()
             c.clear_stream()
             note = "⚠ La respuesta se cortó por el límite de tokens de salida (ajustable en Configuración)." if p.get("finish") == "length" else None
             c.assistant_body(p.get("reasoning", ""), p.get("content", ""), note)
@@ -935,6 +1070,7 @@ class App:
     def _run_finished(self, outcome, error, restore):
         c = self.chat
         c.clear_stream()
+        self.meter.step_end()          # un paso cortado por un error de red no se pierde del acumulado
         self._dismiss_dialog()
         if restore:
             # el mensaje del usuario ya no está en el historial: se redibuja sin él y su texto vuelve al campo de entrada
@@ -991,11 +1127,20 @@ class App:
         try:
             if self.sidebar_visible:
                 self.cfg["sidebar_w"] = max(160, self.main.sashpos(0))
+            self.cfg["sidebar_visible"] = self.sidebar_visible
+            estado = self.root.state()
+            self.cfg["win_zoomed"] = estado == "zoomed"
+            if estado == "normal":         # maximizada o minimizada, la geometría no es la de trabajo: se conserva la anterior
+                self.cfg["win_geometry"] = self.root.geometry()
             self.cfg.save()
         except (tk.TclError, OSError):
             pass
         if self._server is not None:
             self._server.stop()
+        try:
+            self.root.after_cancel(self._meter_job)
+        except (tk.TclError, AttributeError):
+            pass
         self.root.destroy()
 
 
