@@ -130,12 +130,15 @@ def read_text(path):
         raise ToolError(f"file is {size // 1024} KB; the limit is {MAX_READ_BYTES // 1024} KB (use search or read a line range of a smaller file)")
     with open(path, "rb") as f:
         raw = f.read()
-    if b"\x00" in raw[:8192]:
+    utf16 = raw.startswith(b"\xff\xfe")     # lo que produce `>` de PowerShell; "utf-16" conserva el BOM al reescribir
+    if b"\x00" in raw[:8192] and not utf16:
         raise ToolError("file looks binary, not text")
-    enc = "utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8"
+    enc = "utf-16" if utf16 else "utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8"
     try:
         text = raw.decode(enc)
     except UnicodeDecodeError:
+        if utf16:
+            raise ToolError("cannot decode file as text")
         enc = "cp1252"
         try:
             text = raw.decode(enc)

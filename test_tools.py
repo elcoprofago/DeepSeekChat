@@ -41,6 +41,7 @@ mk(os.path.join(ws, "calc.py"), b"def suma(a, b):\r\n    return a - b\r\n\r\npri
 mk(os.path.join(ws, "notas.txt"), "﻿café y mañana\nsegunda línea\n".encode("utf-8"))        # BOM + tildes
 mk(os.path.join(ws, "sub", "util.py"), b"X = 1\nX = 1\n")                                                    # texto repetido
 mk(os.path.join(ws, "binario.bin"), b"\x00\x01\x02" * 100)
+mk(os.path.join(ws, "salida16.txt"), "medición uno\r\nsegunda línea\r\n".encode("utf-16"))    # BOM FF FE, como la redirección de PowerShell
 mk(os.path.join(ws, ".git", "config"), b"[core]\n")
 mk(os.path.join(ws, "node_modules", "x.js"), b"const secreto_en_node_modules = 1\n")
 mk(os.path.join(ws, "CONTROL.txt"), b"ESTE ARCHIVO DEBE SOBREVIVIR\n")
@@ -92,6 +93,10 @@ check("lee UTF-8 con BOM y tildes", "café y mañana" in r and "﻿" not in r, r
 r = ex("read_file", {"path": "largo.txt", "offset": 10, "limit": 3})
 check("read_file respeta offset y limit", "linea 10" in r and "linea 12" in r and "linea 13" not in r and "offset=13" in r, r)
 check("read_file rechaza binarios", "binary" in ex("read_file", {"path": "binario.bin"}))
+r = ex("read_file", {"path": "salida16.txt"})
+check("read_file lee UTF-16 con BOM (salida de PowerShell), sin ceros ni error", "medición uno" in r and "segunda línea" in r and "\x00" not in r and not r.startswith("ERROR"), r)
+r = ex("search", {"pattern": "segunda l"})
+check("search encuentra dentro de un UTF-16", "salida16.txt:2:" in r, r)
 check("read_file de carpeta sugiere list_dir", "list_dir" in ex("read_file", {"path": "sub"}))
 check("read_file de inexistente da error claro", "does not exist" in ex("read_file", {"path": "nada.txt"}))
 r = ex("search", {"pattern": "suma"})
@@ -127,6 +132,10 @@ tb.undo_last()         # deshace notas.txt
 tb.undo_last()         # deshace calc.py
 check("undo restaura calc.py byte a byte", sha(os.path.join(ws, "calc.py")) == antes)
 check("el diario quedó vacío", len(tb.journal) == 0 and tb.undo_last().startswith("No hay"), n_j)
+r = ex("edit_file", {"path": "salida16.txt", "old": "uno", "new": "UNO"})
+raw16 = open(os.path.join(ws, "salida16.txt"), "rb").read()
+check("edit_file sobre UTF-16 conserva la codificación, el BOM y el fin de línea",
+      raw16.startswith(b"\xff\xfe") and raw16.decode("utf-16") == "medición UNO\r\nsegunda línea\r\n", (r, raw16[:12]))
 
 # ---- escritura nueva y deshacer de un archivo creado
 r = ex("write_file", {"path": "nuevo/dir/hola.txt", "content": "hola\n"})
