@@ -467,6 +467,44 @@ check("con el usage exacto: total 4.060 sin '~' y la barra tiene relleno",
 app._meter_reset()
 check("reiniciar el contador lo pone en cero", app.meter.total() == 0 and "Jornada: 0 tok" in texto_canvas(app.cv_bar))
 
+# ---------------------------------------------------------------- «Continuar» tras el tope de pasos
+app.new_session()
+app.use_folder(ws)
+check("premisa: el botón Continuar no se ve al principio", not app.btn_continue.winfo_ismapped())
+app.max_steps = 2
+guion.pasos = [con_llamada(call("m1", "list_dir", {})), con_llamada(call("m2", "read_file", {"path": "a.txt"})), respuesta("Terminé.")]
+app.input.insert("1.0", "borrador a medio escribir")
+app.send("hacé una tarea larga", keep_draft=True)
+check("el agente corta por el tope de pasos", terminar())
+root.update()
+check("EFECTO: tras el tope aparece el botón Continuar, a la vista", app.btn_continue.winfo_ismapped() and app.btn_continue.winfo_viewable())
+check("el aviso del chat nombra el botón", "Continuar" in app.chat.get_text(), app.chat.get_text()[-200:])
+app.btn_continue.invoke()
+check("Continuar (el botón real) arranca el agente", app.busy)
+check("el agente termina la tarea", terminar())
+root.update()
+usuarios = [m["content"] for m in app.sess.messages if m["role"] == "user"]
+check("EFECTO: el historial recibió el pedido de seguir y el modelo lo vio", usuarios[-1] == dc.CONTINUE_TEXT and guion.vistos[-1][1][-1]["content"] == dc.CONTINUE_TEXT, usuarios)
+check("EFECTO: la respuesta final llegó y la sesión quedó bien formada", app.sess.messages[-1]["content"] == "Terminé." and not ag.validate(app.sess.messages))
+check("CONTROL: lo que el usuario tenía escrito quedó intacto", app.input.get("1.0", "end-1c") == "borrador a medio escribir", app.input.get("1.0", "end-1c"))
+check("tras terminar bien, el botón Continuar se esconde", not app.btn_continue.winfo_ismapped())
+app.input.delete("1.0", "end")
+guion.pasos = [con_llamada(call("n1", "list_dir", {})), con_llamada(call("n2", "read_file", {"path": "a.txt"}))]
+app.send("otra tarea larga")
+terminar()
+root.update()
+check("premisa: volvió a cortar y el botón está", app.btn_continue.winfo_ismapped())
+guion.pasos = [dsapi.ApiError("Sin conexión")]
+app.btn_continue.invoke()
+terminar()
+root.update()
+check("si Continuar falla por la red, el botón queda para reintentar y el texto no ensucia el campo",
+      app.btn_continue.winfo_ismapped() and app.input.get("1.0", "end-1c") == "", app.input.get("1.0", "end-1c"))
+app._activate(app._blank_session(""))
+check("al cambiar de sesión el botón se esconde", not app.btn_continue.winfo_ismapped())
+app.max_steps = ag.DEFAULT_MAX_STEPS
+app.new_session()
+
 # ---------------------------------------------------------------- geometría: se recuerda y se corrige si el monitor cambió
 V = (0, 0, 1920, 1080)
 V2 = (-1920, 0, 3840, 1080)          # un segundo monitor a la izquierda

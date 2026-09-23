@@ -235,5 +235,23 @@ h[3] = _res(7, "de otra llamada")       # c2 sin resultado, y uno que no corresp
 n = agent.repair(h)
 check("repair: resultado ajeno se descarta y el faltante se repone", agent.validate(h) == [] and n == 2 and not any(m.get("tool_call_id") == "c7" for m in h), (n, h))
 
+# ---- 12. la guarda de repeticiones se reinicia cuando algo cambió de verdad
+check("tope de pasos por defecto: 60 (el de antes, 30, cortaba tareas normales)",
+      agent.DEFAULT_MAX_STEPS == 60 and agent.Agent(None).max_steps == 60)
+rd = lambda i: [("tool_calls", [call(f"r{i}", "read_file", {"path": "a.txt"})]), ("finish", "tool_calls")]
+wr = [("tool_calls", [call("w1", "write_file", {"path": "b.txt", "content": "nuevo\n"})]), ("finish", "tool_calls")]
+fin = [("content", "listo"), ("finish", "stop")]
+st, m, ev, f = run([rd(1), rd(2), wr, rd(3), rd(4), fin])
+res = [x["content"] for x in m if x["role"] == "tool"]
+check("una escritura exitosa reinicia el contador: releer después NO se trata como repetición",
+      st == "done" and not any("already made" in r for r in res) and res[2].startswith("OK"), (st, res))
+ed_mal = [("tool_calls", [call("e1", "edit_file", {"path": "a.txt", "old": "no está", "new": "x"})]), ("finish", "tool_calls")]
+st, m, ev, f = run([rd(1), rd(2), ed_mal, rd(3), fin])
+res = [x["content"] for x in m if x["role"] == "tool"]
+check("CONTROL: una edición que falló NO reinicia: la 3.ª lectura igual se frena",
+      res[2].startswith("ERROR") and "already made" in res[3], res)
+st, m, ev, f = run([rd(1), rd(2), rd(3), fin])
+check("CONTROL: sin cambios de por medio, repetir sigue frenándose", "already made" in [x["content"] for x in m if x["role"] == "tool"][2])
+
 print("\nFALLAS:", fallas if fallas else "ninguna")
 raise SystemExit(1 if fallas else 0)

@@ -30,6 +30,7 @@ GEOMETRIA_INICIAL = "1240x780"
 SIN_EFFORT = "(por defecto)"
 APPROVALS = {"ask": "Preguntar todo", "edits": "Editar sin preguntar", "all": "Todo sin preguntar"}
 MUTATING = {"write_file", "edit_file", "run_command"}
+CONTINUE_TEXT = "Seguí con lo que estabas haciendo, desde donde quedaste."
 REMOTE_BUDGET = 600000
 LOCAL_TIMEOUT = 900
 miles = chatview.miles
@@ -82,6 +83,7 @@ class App:
         self.busy = False
         self.cancel_ev = threading.Event()
         self.agent = None
+        self.max_steps = ag.DEFAULT_MAX_STEPS      # pasos por turno; atributo para poder probarlo con un tope chico
         self.worker = None
         self._dialog = None
         self._server = None
@@ -215,6 +217,8 @@ class App:
         self.input.bind("<Shift-Return>", lambda e: None)
         self.btn_send = ttk.Button(self.bottom, text="Enviar", width=9, command=self.on_send_click)
         self.btn_send.pack(side="left", anchor="s", padx=(8, 0))
+        # solo se ve cuando el agente cortó por el tope de pasos: un clic y sigue, sin escribir nada
+        self.btn_continue = ttk.Button(self.bottom, text="Continuar", width=10, command=self.continue_run)
         self.status = ttk.Frame(self.col, padding=(0, 0, 0, 6))
         self.tokens_lbl = ttk.Label(self.status, text="")
         self.tokens_lbl.pack(side="left")
@@ -555,6 +559,7 @@ class App:
             pass
         self.attachments = []
         self._redraw_attachments()
+        self._show_continue(False)
         self.last_usage = None
         self._make_toolbox()
         self.explorer.set_root(s.workspace if os.path.isdir(s.workspace or "") else "")
@@ -879,8 +884,19 @@ class App:
             self._server_key = key
         return self._server
 
-    def send(self, text=None):
-        """Manda el texto del campo de entrada (o el indicado, para tests) junto con los adjuntos."""
+    def _show_continue(self, show):
+        if show:
+            self.btn_continue.pack(side="left", anchor="s", padx=(8, 0), before=self.btn_send)
+        else:
+            self.btn_continue.pack_forget()
+
+    def continue_run(self):
+        """Retoma la tarea tras el tope de pasos. Lo que el usuario tenga escrito o adjunto queda intacto."""
+        self.send(CONTINUE_TEXT, keep_draft=True)
+
+    def send(self, text=None, keep_draft=False):
+        """Manda el texto del campo de entrada (o el indicado, para tests) junto con los adjuntos.
+        Con keep_draft=True no toca lo que haya en el campo ni los adjuntos (así funciona «Continuar»)."""
         if self.busy:
             return
         if text is None:
@@ -898,7 +914,7 @@ class App:
                 else:
                     self.open_settings()
             return
-        files = list(self.attachments)
+        files = [] if keep_draft else list(self.attachments)
         try:
             content = dsapi.build_message(text, files)
         except (dsapi.AttachError, OSError) as e:
@@ -907,9 +923,11 @@ class App:
         n0 = len(s.messages)
         s.messages.append({"role": "user", "content": content})
         self.chat.user(text, files)
-        self.input.delete("1.0", "end")
-        self.attachments = []
-        self._redraw_attachments()
+        if not keep_draft:
+            self.input.delete("1.0", "end")
+            self.attachments = []
+            self._redraw_attachments()
+        self._show_continue(False)
         self.cancel_ev = threading.Event()
         self._set_busy(True)
         self.worker = threading.Thread(target=self._work, args=(s, entry, self.toolbox, n0, text, files, self.cancel_ev), daemon=True)
@@ -971,7 +989,7 @@ class App:
                     raise localmodels.LocalError(f"No se encuentra el modelo {entry['path']} (¿está conectado el pendrive?).")
                 base = self._local_server().ensure(entry["path"], int(self.cfg["local_ctx"]), cancel)
             budget = int(self.cfg["local_ctx"]) * 3 if entry["kind"] == "local" else REMOTE_BUDGET
-            agent = ag.Agent(lambda msgs, tools: self._make_stream(entry, s, base, msgs, tools, toolbox), toolbox, budget_chars=budget)
+            agent = ag.Agent(lambda msgs, tools: self._make_stream(entry, s, base, msgs, tools, toolbox), toolbox, max_steps=self.max_steps, budget_chars=budget)
             self.agent = agent
             outcome = agent.run(s.messages, emit, cancel)
         except Exception as e:                      # noqa: BLE001 — cualquier falla se muestra, ninguna se traga
@@ -1076,7 +1094,7 @@ class App:
             # el mensaje del usuario ya no está en el historial: se redibuja sin él y su texto vuelve al campo de entrada
             c.render_session(self.sess.messages, self._label())
             text, files = restore
-            if text and not self.input.get("1.0", "end-1c").strip():
+            if text and text != CONTINUE_TEXT and not self.input.get("1.0", "end-1c").strip():
                 self.input.insert("1.0", text)
             for p in files:
                 if p not in self.attachments:
@@ -1087,6 +1105,8 @@ class App:
         elif outcome == "cancelled":
             c.note("■ Interrumpido.")
         self._set_busy(False)
+        # también si «Continuar» mismo falló (red caída): el botón vuelve a estar para reintentar
+        self._show_continue((outcome == "max_steps" and not error) or bool(restore and restore[0] == CONTINUE_TEXT))
         self.refresh_sessions()
         self.explorer.refresh()
         self._retitle()

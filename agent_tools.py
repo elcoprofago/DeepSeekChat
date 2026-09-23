@@ -47,7 +47,7 @@ _BLOCK = [
     (r"\b(shutdown|restart-computer|stop-computer)\b", "apagar o reiniciar"),
     (r"\b(taskkill|stop-process|wmic)\b", "terminar procesos"),
     (r"\bnet\s+(user|localgroup|stop)\b", "modificar usuarios o servicios"),
-    (r"\bgit\s+(push|reset|clean|rebase|checkout\s+--|restore|stash\s+(drop|clear)|branch\s+-d|filter-branch|gc\s+--prune)", "operación de git que pierde o publica trabajo"),
+    (r"\bgit\s+(push|clean|rebase|checkout\s+--|stash\s+(drop|clear)|branch\s+-d|filter-branch|gc\s+--prune)", "operación de git que pierde o publica trabajo"),
     (r"\brobocopy\b.*(/mir|/purge|/move)", "robocopy que borra o mueve"),
     (r"\b(npm|yarn|pnpm)\s+(publish|unpublish)\b|\bvercel\b|\bgh\s+(repo\s+delete|release|pr\s+merge)\b", "publicar o desplegar"),
     (r"\bsupabase\s+(db\s+(push|reset)|link)\b|\bdrop\s+(table|database)\b|\btruncate\s+table\b", "tocar una base de datos"),
@@ -60,14 +60,40 @@ _BLOCK = [
 _BLOCK_RE = [(re.compile(p, re.I), why) for p, why in _BLOCK]
 
 
+# El mensaje de un commit es texto, no un comando: «uso del proceso» no es un `del`. Solo se le quita eso; cualquier
+# otra cosa entre comillas (p. ej. `powershell -c "del x"`) se sigue revisando.
+_COMMIT_MSG = re.compile(r"""(?<![\w-])(?:-m|--message)(?:\s+|=)?(?:"[^"]*"|'[^']*')""", re.I)
+_GIT_SEGMENT_SPLIT = re.compile(r"&&|\|\||[;&|\n]")
+_GIT_RESET_LOSES = re.compile(r"--(hard|merge|keep)\b", re.I)
+_GIT_STAGED_ONLY = re.compile(r"(--staged\b|\s-S\b)", re.I)
+_GIT_TOUCHES_TREE = re.compile(r"(--worktree\b|\s-W\b)", re.I)
+
+
+def _git_index_risk(command):
+    """`git reset` y `git restore` solo pierden trabajo si tocan el árbol de trabajo. Sacar cosas del índice
+    (`reset HEAD`, `restore --staged`) es lo que hace falta para armar un commit y no borra nada."""
+    for seg in _GIT_SEGMENT_SPLIT.split(command):
+        if re.search(r"\bgit\b.*\breset\b", seg, re.I) and _GIT_RESET_LOSES.search(seg):
+            return "operación de git que pierde o publica trabajo"
+        if re.search(r"\bgit\b.*\brestore\b", seg, re.I) and (not _GIT_STAGED_ONLY.search(seg) or _GIT_TOUCHES_TREE.search(seg)):
+            return "operación de git que pierde o publica trabajo"
+    return None
+
+
+# En cmd, `programa | more` devuelve el código de salida de `more`, no el de `programa`: un fallo queda como «0».
+_PIPE_MASKS_EXIT = re.compile(r"\|\s*(more|findstr|find|tee|head|tail|sort|select-string)\b", re.I)
+
+
 def check_command(command):
     """Devuelve el motivo si el comando no debe ejecutarse nunca, o None si puede seguir al pedido de permiso."""
     if not command or not command.strip():
         return "comando vacío"
+    if re.search(r"\bgit\b.*\bcommit\b", command, re.I):
+        command = _COMMIT_MSG.sub(" ", command)
     for rx, why in _BLOCK_RE:
         if rx.search(command):
             return why
-    return None
+    return _git_index_risk(command)
 
 
 # ---------------------------------------------------------------- texto y archivos
@@ -347,7 +373,8 @@ class ToolBox:
         why = check_command(command)
         if why:
             return (f"BLOCKED by the safety filter ({why}). This command is never run automatically. "
-                    "Tell the user what you wanted to do so they can do it themselves.")
+                    "Tell the user what you wanted to do so they can do it themselves. If a harmless word in a file name or text "
+                    "triggered it, rephrase: for a commit message, write it to a file and use `git commit -F file`.")
         if not self._ask("command", "Ejecutar comando", command):
             return "DENIED: the user did not allow this command. Do not retry it; ask the user what they want."
         timeout = max(1, min(int(timeout), MAX_TIMEOUT))
@@ -386,6 +413,9 @@ class ToolBox:
         self._proc = None
         out = decode_output(b"".join(chunks)).replace("\r\n", "\n")
         status = f"[killed: {killed}]" if killed else f"[exit code {proc.returncode}]"
+        if not killed and _PIPE_MASKS_EXIT.search(command):
+            status += (" (WARNING: the command has a pipe, so this is the exit code of its LAST part, not of the program you ran; "
+                       "a failure may be hidden. Run it again without the pipe to know the real result.)")
         return f"{status}\n{truncate(out.strip())}" if out.strip() else status
 
     @staticmethod

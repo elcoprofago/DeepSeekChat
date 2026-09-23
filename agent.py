@@ -13,6 +13,10 @@ import agent_tools as at
 OMITTED = "[resultado anterior omitido para ahorrar contexto]"
 REPEAT_WARN = 3
 REPEAT_ABORT = 5
+DEFAULT_MAX_STEPS = 60
+# Herramientas que cambian el estado del proyecto: tras una que salió bien, repetir una lectura o volver a correr
+# los tests ya no es repetir en vano (el resultado puede ser otro), así que el contador de repeticiones empieza de cero.
+STATE_CHANGING = {"write_file", "edit_file", "run_command"}
 
 
 def api_messages(messages, budget_chars=None):
@@ -81,7 +85,7 @@ def repair(messages):
 
 
 class Agent:
-    def __init__(self, make_stream, toolbox=None, max_steps=30, budget_chars=600000):
+    def __init__(self, make_stream, toolbox=None, max_steps=DEFAULT_MAX_STEPS, budget_chars=600000):
         self.make_stream = make_stream      # (mensajes_api, herramientas|None) -> iterable de eventos con .cancel()
         self.toolbox = toolbox
         self.max_steps = max_steps
@@ -161,10 +165,12 @@ class Agent:
                                       "with what you know, or try a different approach." % (seen[key] - 1))
                         else:
                             result = self.toolbox.execute(name, args, cancel)
+                            if name in STATE_CHANGING and not result.startswith(("ERROR", "BLOCKED", "DENIED")):
+                                seen.clear()
                 messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
                 emit("tool_result", c["id"], name, result)
             if aborted:
                 emit("notice", "Se detectó un bucle (el modelo repitió la misma llamada); se detuvo el agente.")
                 return "loop"
-        emit("notice", f"Se alcanzó el máximo de {self.max_steps} pasos sin una respuesta final. Podés escribir «seguí» para continuar.")
+        emit("notice", f"Se alcanzó el máximo de {self.max_steps} pasos sin una respuesta final. Apretá «Continuar» (o escribí «seguí») para que siga.")
         return "max_steps"

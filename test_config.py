@@ -105,6 +105,7 @@ prog = ("import sys; sys.path.insert(0, sys.argv[1]); import dsapi; c = dsapi.Co
         "c.set_api_key('k', password='p'); print(c.key_mode)")
 import subprocess
 env = {k: v for k, v in os.environ.items() if k != "DSCHAT_CONFIG_DIR"}
+env["PYTHONUTF8"] = "1"      # el hijo imprime una ruta con ñ: sin esto escribe cp1252 y el padre no la decodifica como UTF-8
 r = subprocess.run([sys.executable, "-c", prog, app], capture_output=True, text=True, env=env, encoding="utf-8")
 out = r.stdout.splitlines()
 check("portable.flag en el padre de app\\: modo portable con data\\ junto al programa",
