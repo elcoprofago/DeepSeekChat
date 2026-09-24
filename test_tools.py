@@ -237,6 +237,86 @@ ok = ["python --version", "python -m pytest -q", "npm run build", "npm install",
 bloqueados = [c for c in ok if at.check_command(c)]
 check("control: comandos de trabajo normal NO se bloquean", not bloqueados, [(c, at.check_command(c)) for c in bloqueados])
 
+# ---- borrado: delete_path pide permiso, deja copia y se puede deshacer
+bk_d = os.path.join(base, "respaldos_borrado")
+pedidos.clear()
+tb_d = at.ToolBox(ws, confirm=confirm_si, approval="ask", backup_dir=bk_d)
+exd = tb_d.execute
+mk(os.path.join(ws, "borrame.txt"), "contenido único\n".encode("utf-8"))
+h_b = sha(os.path.join(ws, "borrame.txt"))
+r = exd("delete_path", {"path": "borrame.txt"})
+check("delete_path borra un archivo y avisa", r.startswith("OK") and not os.path.exists(os.path.join(ws, "borrame.txt")), r)
+check("delete_path pidió permiso como 'delete' y mostró qué se borra", [p[0] for p in pedidos] == ["delete"] and "borrame.txt" in pedidos[0][2], pedidos)
+check("lo borrado quedó en la copia, entero", len(os.listdir(bk_d)) == 1 and sha(os.path.join(bk_d, os.listdir(bk_d)[0])) == h_b)
+msg = tb_d.undo_last()
+check("deshacer restaura el archivo borrado, idéntico", "Restaurado" in msg and sha(os.path.join(ws, "borrame.txt")) == h_b, msg)
+check("deshacer dejó el diario vacío", tb_d.journal == [])
+
+os.makedirs(os.path.join(ws, "carpeta_b", "hondo"))
+mk(os.path.join(ws, "carpeta_b", "a.txt"), b"AAA\n")
+mk(os.path.join(ws, "carpeta_b", "hondo", "b.txt"), b"BBB\n")
+mk(os.path.join(ws, "vecino.txt"), b"NO TOCAR\n")
+h_carpeta = {"a.txt": sha(os.path.join(ws, "carpeta_b", "a.txt")), "hondo\\b.txt": sha(os.path.join(ws, "carpeta_b", "hondo", "b.txt"))}
+h_vecino = sha(os.path.join(ws, "vecino.txt"))
+r = exd("delete_path", {"path": "carpeta_b"})
+check("delete_path borra una carpeta entera y cuenta los archivos", r.startswith("OK") and "2 files" in r and not os.path.exists(os.path.join(ws, "carpeta_b")), r)
+check("CONTROL: el archivo vecino sigue ahí tras borrar la carpeta", sha(os.path.join(ws, "vecino.txt")) == h_vecino)
+msg = tb_d.undo_last()
+check("deshacer restaura la carpeta con todo su contenido",
+      all(sha(os.path.join(ws, "carpeta_b", k)) == v for k, v in h_carpeta.items()), msg)
+
+# denegar y el modo «edits» (que deja editar solo) no borran
+pedidos.clear()
+tb_n = at.ToolBox(ws, confirm=confirm_no, approval="ask", backup_dir=bk_d)
+r = tb_n.execute("delete_path", {"path": "vecino.txt"})
+check("si el usuario deniega, no se borra", r.startswith("DENIED") and os.path.exists(os.path.join(ws, "vecino.txt")) and tb_n.journal == [], r)
+tb_e = at.ToolBox(ws, confirm=confirm_no, approval="edits", backup_dir=bk_d)
+r = tb_e.execute("delete_path", {"path": "vecino.txt"})
+check("con permiso de edición automática borrar SIGUE preguntando", r.startswith("DENIED") and len(pedidos) == 2 and os.path.exists(os.path.join(ws, "vecino.txt")), (r, pedidos))
+tb_a = at.ToolBox(ws, confirm=confirm_no, approval="all", backup_dir=bk_d)
+mk(os.path.join(ws, "borrame2.txt"), b"x\n")
+pedidos.clear()
+r = tb_a.execute("delete_path", {"path": "borrame2.txt"})
+check("con permiso total borra sin preguntar, y sigue siendo deshacible", r.startswith("OK") and pedidos == [] and not os.path.exists(os.path.join(ws, "borrame2.txt")), r)
+tb_a.undo_last()
+check("...y deshacer lo devuelve", os.path.exists(os.path.join(ws, "borrame2.txt")))
+
+# lo que NO se puede borrar
+pedidos.clear()
+for nombre, ruta in [("la carpeta de trabajo", "."), (".git", ".git"), ("fuera con ..", "..\\afuera\\secreto.txt"),
+                     ("fuera con ruta absoluta", os.path.join(outside, "secreto.txt")), ("inexistente", "no_existe.txt"),
+                     ("el junction hacia afuera", "sub\\puerta"), ("una carpeta que contiene un junction", "sub")]:
+    r = exd("delete_path", {"path": ruta})
+    check(f"delete_path se niega: {nombre}", r.startswith("ERROR"), r)
+check("CONTROL: nada de eso se tocó", sorted(os.listdir(outside)) == ["secreto.txt"] and os.path.isdir(os.path.join(ws, "sub", "puerta"))
+      and sha(os.path.join(ws, ".git", "config")) == h_git and os.path.exists(os.path.join(ws, "sub", "util.py")))
+check("las negativas no llegaron a pedir permiso", pedidos == [], pedidos)
+r = at.ToolBox(ws, confirm=confirm_si, approval="ask").execute("delete_path", {"path": "vecino.txt"})
+check("sin carpeta de copias no borra", r.startswith("ERROR") and "backup" in r and os.path.exists(os.path.join(ws, "vecino.txt")), r)
+tope = at.MAX_DELETE_BYTES
+at.MAX_DELETE_BYTES = 3
+r = exd("delete_path", {"path": "vecino.txt"})
+at.MAX_DELETE_BYTES = tope
+check("más grande que el tope: no borra", r.startswith("ERROR") and "too big" in r and os.path.exists(os.path.join(ws, "vecino.txt")), r)
+
+# deshacer no pisa lo que apareció después
+r = exd("delete_path", {"path": "vecino.txt"})
+mk(os.path.join(ws, "vecino.txt"), b"OTRO, escrito a mano despues\n")
+msg = tb_d.undo_last()
+check("deshacer no pisa un archivo nuevo con el mismo nombre", "ya hay algo" in msg and open(os.path.join(ws, "vecino.txt"), "rb").read() == b"OTRO, escrito a mano despues\n"
+      and len(tb_d.journal) == 1, msg)
+os.remove(os.path.join(ws, "vecino.txt"))
+tb_d.undo_last()
+check("...y una vez liberado el nombre, sí restaura", sha(os.path.join(ws, "vecino.txt")) == h_vecino)
+
+# borrar sigue prohibido por comando, y el aviso indica el camino
+mk(os.path.join(ws, "borrame3.txt"), b"x\n")
+r = exd("run_command", {"command": "del borrame3.txt"})
+check("del por comando sigue bloqueado y apunta a delete_path", r.startswith("BLOCKED") and "delete_path" in r and os.path.exists(os.path.join(ws, "borrame3.txt")), r)
+r = exd("run_command", {"command": "git push"})
+check("otros bloqueos no llevan la pista de borrar", r.startswith("BLOCKED") and "delete_path" not in r, r)
+os.remove(os.path.join(ws, "borrame3.txt"))
+
 # ---- protocolo
 check("herramienta desconocida: error que lista las válidas", "unknown tool" in ex("format_disk", {}) and "read_file" in ex("format_disk", {}))
 check("argumentos de más: error claro, no excepción", ex("read_file", {"path": "calc.py", "basura": 1}).startswith("ERROR"))

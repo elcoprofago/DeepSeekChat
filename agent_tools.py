@@ -6,6 +6,7 @@ Reglas de fondo:
   * Nada fuera de la carpeta de trabajo (se resuelve el camino real, así que un junction no sirve de puerta).
   * Antes de pisar un archivo se guarda una copia; cada cambio queda en un diario y se puede deshacer.
   * Los comandos destructivos o interactivos se bloquean siempre, aunque el usuario haya dado permiso total.
+  * Borrar se hace con delete_path, no con `del`/`rm`: pide permiso, no sigue enlaces y deja lo borrado en una copia que se restaura.
   * Toda salida que vuelve al modelo va truncada: un log gigante no puede reventar el contexto.
 """
 import ctypes
@@ -26,6 +27,7 @@ MAX_LIST_ENTRIES = 300
 MAX_SEARCH_MATCHES = 200
 DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 600
+MAX_DELETE_BYTES = 500 * 1024 * 1024      # lo que se borra se conserva en una copia: más que esto no se borra desde acá
 IGNORE_DIRS = {".git", "node_modules", ".next", "__pycache__", ".venv", "venv", ".dschat-backup", ".mypy_cache",
                ".pytest_cache", "dist", "build", ".turbo", ".vercel"}
 
@@ -99,6 +101,40 @@ def check_command(command):
     return _git_index_risk(command)
 
 
+# ---------------------------------------------------------------- borrado
+
+def _is_link(p):
+    """Symlink o junction (punto de reanálisis). Borrarlo, o copiarlo a otro volumen, podría alcanzar lo que apunta fuera."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return False
+    return os.path.islink(p) or bool(getattr(st, "st_file_attributes", 0) & 0x400)
+
+
+def _tree_stats(p):
+    """(archivos, bytes, hay_enlaces) de un archivo o carpeta, sin entrar nunca en un enlace."""
+    if _is_link(p):
+        return 0, 0, True
+    if not os.path.isdir(p):
+        return 1, os.path.getsize(p), False
+    files = size = 0
+    for d, dirs, fs in os.walk(p, followlinks=False):
+        if any(_is_link(os.path.join(d, n)) for n in dirs + fs):
+            return files, size, True
+        for f in fs:
+            files += 1
+            try:
+                size += os.path.getsize(os.path.join(d, f))
+            except OSError:
+                pass
+    return files, size, False
+
+
+def format_bytes(n):
+    return f"{n} bytes" if n < 1024 else f"{n / 1024:.1f} KB" if n < 1024 ** 2 else f"{n / 1024 ** 2:.1f} MB"
+
+
 # ---------------------------------------------------------------- texto y archivos
 
 def _oem_codepage():
@@ -162,8 +198,8 @@ def write_text(path, text, enc="utf-8", eol="\n"):
 class ToolBox:
     """Las herramientas de una sesión sobre una carpeta de trabajo.
 
-    confirm(kind, titulo, detalle) -> bool  lo llama el agente antes de escribir o ejecutar; kind es 'edit' o 'command'.
-    approval: 'ask' pregunta todo, 'edits' deja editar solo, 'all' no pregunta (el filtro de comandos sigue activo).
+    confirm(kind, titulo, detalle) -> bool  lo llama el agente antes de escribir, borrar o ejecutar; kind es 'edit', 'delete' o 'command'.
+    approval: 'ask' pregunta todo, 'edits' deja editar solo (borrar sigue preguntando), 'all' no pregunta (el filtro de comandos sigue activo).
     """
 
     def __init__(self, root, confirm=None, approval="ask", backup_dir=None, journal=None):
@@ -373,14 +409,72 @@ class ToolBox:
             return denied
         return f"OK: edited {self.rel(p)} ({n if replace_all else 1} replacement{'s' if replace_all and n > 1 else ''})"
 
+    # ------------------------------------------------------------ borrado
+
+    def tool_delete_path(self, path):
+        raw = (path or "").strip().strip('"')
+        raw = raw if os.path.isabs(raw) else os.path.join(self.root, raw)
+        if _is_link(raw):
+            raise ToolError(f"'{path}' is a symlink or junction; it is not deleted from here (the user can remove it by hand)")
+        p = self.resolve(path)
+        if os.path.normcase(p) == os.path.normcase(self.root):
+            raise ToolError("refusing to delete the workspace folder itself")
+        if not self.backup_dir:
+            raise ToolError("no backup folder configured; refusing to delete without a way to undo")
+        files, size, links = _tree_stats(p)
+        if links:
+            raise ToolError(f"'{path}' contains a symlink or junction; it is not deleted from here, because following it could reach "
+                            "outside the workspace. Tell the user so they can deal with it by hand")
+        if size > MAX_DELETE_BYTES:
+            raise ToolError(f"'{path}' is too big to keep a restorable copy ({size // 2**20} MB, limit {MAX_DELETE_BYTES // 2**20} MB)")
+        isdir = os.path.isdir(p)
+        detail = (f"{self.rel(p)}\n{'Carpeta' if isdir else 'Archivo'}: {files} archivo{'s' if files != 1 else ''}, {format_bytes(size)}.\n"
+                  "Se guarda una copia: «Deshacer cambio» lo restaura.")
+        if not self._ask("delete", f"Borrar {self.rel(p)}", detail):
+            return "DENIED: the user did not allow this deletion. Do not retry it; ask the user what they want."
+        os.makedirs(self.backup_dir, exist_ok=True)
+        dst = os.path.join(self.backup_dir, f"{time.strftime('%Y%m%d-%H%M%S')}-{len(self.journal):03d}-borrado-{self.rel(p).replace('/', '__')}")
+        try:
+            shutil.move(p, dst)
+        except OSError:
+            if os.path.exists(p) and os.path.exists(dst):      # la copia quedó a medias y el original sigue entero: se descarta la copia
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst, ignore_errors=True)
+                else:
+                    os.remove(dst)
+            raise
+        if os.path.exists(p) or _tree_stats(dst)[:2] != (files, size):
+            if not os.path.exists(p):
+                shutil.move(dst, p)
+            raise ToolError("the copy kept for undo does not match what was deleted; nothing was removed")
+        self.journal.append({"path": p, "backup": dst, "deleted": True, "when": time.strftime("%Y-%m-%d %H:%M:%S")})
+        return f"OK: deleted {self.rel(p)} ({files} file{'s' if files != 1 else ''}, {format_bytes(size)}); the user can restore it with undo"
+
+    def _undo_delete(self, e):
+        p, b = e["path"], e["backup"]
+        if not os.path.exists(b):
+            self.journal.append(e)
+            return f"No se puede deshacer: falta la copia {b}"
+        if os.path.lexists(p):
+            self.journal.append(e)
+            return f"No se puede restaurar {self.rel(p)}: ya hay algo con ese nombre. Movelo o renombralo y volvé a intentar."
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        if os.path.isdir(b):
+            shutil.copytree(b, p, symlinks=True)
+        else:
+            shutil.copy2(b, p)
+        return f"Restaurado {self.rel(p)} (lo había borrado el agente)."
+
     # ------------------------------------------------------------ comandos
 
     def tool_run_command(self, command, timeout=DEFAULT_TIMEOUT, cancel=None):
         why = check_command(command)
         if why:
+            hint = (" To delete a file or folder inside the workspace use the delete_path tool: it asks the user and keeps a copy they can restore."
+                    if why.startswith("borrar") else "")
             return (f"BLOCKED by the safety filter ({why}). This command is never run automatically. "
                     "Tell the user what you wanted to do so they can do it themselves. If a harmless word in a file name or text "
-                    "triggered it, rephrase: for a commit message, write it to a file and use `git commit -F file`.")
+                    "triggered it, rephrase: for a commit message, write it to a file and use `git commit -F file`." + hint)
         if not self._ask("command", "Ejecutar comando", command):
             return "DENIED: the user did not allow this command. Do not retry it; ask the user what they want."
         timeout = max(1, min(int(timeout), MAX_TIMEOUT))
@@ -442,6 +536,8 @@ class ToolBox:
         if not self.journal:
             return "No hay cambios para deshacer."
         e = self.journal.pop()
+        if e.get("deleted"):
+            return self._undo_delete(e)
         p = e["path"]
         if e["backup"]:
             if not os.path.exists(e["backup"]):
@@ -487,8 +583,11 @@ SPECS = [
          "replace_all": {"type": "boolean", "description": "Replace every occurrence"}}, ["path", "old", "new"]),
     _fn("write_file", "Create a new file or fully overwrite one. Prefer edit_file for small changes to existing files.",
         {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
+    _fn("delete_path", "Delete a file or a folder (with everything in it) inside the workspace. The user is asked first and can undo it. "
+        "Only delete what the user asked you to delete. Symlinks and junctions are never deleted.",
+        {"path": {"type": "string", "description": "File or folder to delete"}}, ["path"]),
     _fn("run_command", "Run a shell command (Windows cmd) in the workspace root, e.g. tests or a build. No interactive programs. "
-        "Destructive commands are blocked.",
+        "Destructive commands are blocked (use delete_path to delete files).",
         {"command": {"type": "string"}, "timeout": {"type": "integer", "description": "Seconds, default 60, max 600"}}, ["command"]),
 ]
 

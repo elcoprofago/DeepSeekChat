@@ -81,6 +81,16 @@ d.dismiss()
 check("dismiss niega", res == ["deny"], res)
 
 res.clear()
+d = dialogs.ConfirmDialog(app, "delete", "Borrar carpeta_b", "carpeta_b\nCarpeta: 2 archivos, 8 bytes.", res.append)
+root.update()
+textos = [str(w.cget("text")) for w in d.win.winfo_children()[0].winfo_children() if isinstance(w, ttk.Label)]
+check("borrar: el título dice que va a borrar (no 'ejecutar un comando')", any("borrar" in t for t in textos) and not any("comando" in t for t in textos), textos)
+check("borrar: sin botón de 'permitir todas las ediciones'", not any("ediciones" in str(w.cget("text")) for w in d.win.winfo_children()[0].winfo_children()[-1].winfo_children() if isinstance(w, ttk.Button)))
+check("borrar: el foco arranca en Denegar, no en Permitir", str(d.win.tk.call("focus", "-lastfor", str(d.win))) == str(d.btn_deny), str(d.win.tk.call("focus", "-lastfor", str(d.win))))
+d._finish("allow")
+check("borrar: Permitir responde 'allow'", res == ["allow"], res)
+
+res.clear()
 d = dialogs.ConfirmDialog(app, "edit", "grande", "+" + "x" * 50000, res.append)
 root.update()
 check("detalle enorme: se recorta en pantalla", "recortado" in d.view.get("1.0", "end") and len(d.view.get("1.0", "end")) < 25000)

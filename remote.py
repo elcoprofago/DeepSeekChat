@@ -338,7 +338,7 @@ async function poll(){
   $("send").textContent=busy?"Detener":"Enviar";$("send").className=busy?"bad":"";
   $("cont").style.display=d.can_continue&&!busy?"block":"none";
   const c=d.confirm;
-  if(c){cid=c.id;$("ctitle").textContent=c.kind==="edit"?"Quiere modificar: "+c.title:"Quiere ejecutar:";$("cdetail").textContent=c.detail;$("confirm").style.display="block"}
+  if(c){cid=c.id;$("ctitle").textContent=c.kind==="edit"?"Quiere modificar: "+c.title:c.kind==="delete"?"Quiere borrar: "+c.title:"Quiere ejecutar:";$("cdetail").textContent=c.detail;$("confirm").style.display="block"}
   else{cid=null;$("confirm").style.display="none"}
   if(stick)log.scrollTop=log.scrollHeight;
   schedule(busy||c?700:1800)

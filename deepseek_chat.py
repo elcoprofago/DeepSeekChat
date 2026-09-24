@@ -30,7 +30,7 @@ TITULO_VENTANA = "DeepSeek Chat - © R.A. Sistemas - 2026"      # mismo formato 
 GEOMETRIA_INICIAL = "1240x780"
 SIN_EFFORT = "(por defecto)"
 APPROVALS = {"ask": "Preguntar todo", "edits": "Editar sin preguntar", "all": "Todo sin preguntar"}
-MUTATING = {"write_file", "edit_file", "run_command"}
+MUTATING = {"write_file", "edit_file", "delete_path", "run_command"}
 CONTINUE_TEXT = "Seguí con lo que estabas haciendo, desde donde quedaste."
 REMOTE_BUDGET = 600000
 LOCAL_TIMEOUT = 900
@@ -536,9 +536,9 @@ class App:
         inv = {v: k for k, v in APPROVALS.items()}
         val = inv.get(self.appr_var.get(), "ask")
         if val == "all" and self.interactive:
-            if not messagebox.askokcancel(TITULO, "El agente podrá ejecutar comandos y modificar archivos SIN preguntarte.\n\n"
-                                          "Los comandos destructivos (borrar, formatear, tocar el registro, git push…) siguen bloqueados, "
-                                          "y cada cambio se puede deshacer. ¿Continuar?", parent=self.root):
+            if not messagebox.askokcancel(TITULO, "El agente podrá ejecutar comandos, modificar y borrar archivos de la carpeta de trabajo SIN preguntarte.\n\n"
+                                          "Los comandos destructivos (formatear, tocar el registro, git push…) siguen bloqueados, "
+                                          "y cada cambio o borrado se puede deshacer. ¿Continuar?", parent=self.root):
                 self.appr_var.set(APPROVALS[self.sess.approval])
                 return
         self._set_approval(val)

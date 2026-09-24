@@ -44,7 +44,8 @@ class ConfirmDialog:
         w.transient(app.root)
         f = ttk.Frame(w, padding=14)
         f.pack(fill="both", expand=True)
-        head = "El agente quiere modificar un archivo" if kind == "edit" else "El agente quiere ejecutar un comando"
+        head = {"edit": "El agente quiere modificar un archivo", "delete": "El agente quiere borrar un archivo o carpeta"}.get(
+            kind, "El agente quiere ejecutar un comando")
         ttk.Label(f, text=head, font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(f, text=title, style="Muted.TLabel").pack(anchor="w", pady=(2, 8))
 
@@ -78,12 +79,13 @@ class ConfirmDialog:
         self.btn_allow.pack(side="left")
         if kind == "edit":
             ttk.Button(bf, text="Permitir todas las ediciones de esta sesión", command=lambda: self._finish("allow_session")).pack(side="left", padx=8)
-        ttk.Button(bf, text="Denegar", command=lambda: self._finish("deny")).pack(side="right")
+        self.btn_deny = ttk.Button(bf, text="Denegar", command=lambda: self._finish("deny"))
+        self.btn_deny.pack(side="right")
         w.protocol("WM_DELETE_WINDOW", lambda: self._finish("deny"))
         w.bind("<Escape>", lambda e: self._finish("deny"))
         _place(w, app)
         w.lift()
-        self.btn_allow.focus_set()
+        (self.btn_deny if kind == "delete" else self.btn_allow).focus_set()      # borrar: Enter por accidente no debe ser un «sí»
 
     def _finish(self, result):
         if self._done:

@@ -16,7 +16,7 @@ REPEAT_ABORT = 5
 DEFAULT_MAX_STEPS = 60
 # Herramientas que cambian el estado del proyecto: tras una que salió bien, repetir una lectura o volver a correr
 # los tests ya no es repetir en vano (el resultado puede ser otro), así que el contador de repeticiones empieza de cero.
-STATE_CHANGING = {"write_file", "edit_file", "run_command"}
+STATE_CHANGING = {"write_file", "edit_file", "delete_path", "run_command"}
 
 
 def api_messages(messages, budget_chars=None):
