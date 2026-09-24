@@ -31,6 +31,7 @@ DLL_EXCLUDE = ("_test*", "_ctypes_test*", "*.ico", "*.cat")
 LLAMA_KEEP = ("llama-server.exe", "llama-server-impl.dll", "llama.dll", "llama-common.dll", "mtmd.dll", "ggml*.dll",
               "libomp.dll", "msvcp140*.dll", "vcruntime140*.dll", "LICENSE*")
 LLAMA_CANDIDATES = (
+    r"F:\source\repos\USBagent\bin",
     r"C:\Users\Rodolfo\source\repos\USBagent\bin",
     r"E:\Users\Rodolfo\source\repos\USBagent\bin",
 )

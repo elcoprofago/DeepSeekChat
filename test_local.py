@@ -52,7 +52,7 @@ check("carpeta repetida no duplica; mismo nombre en otra carpeta sí cuenta", no
 check("los ids llevan la ruta completa y el prefijo local:", all(m["id"] == "local:" + m["path"] and os.path.isfile(m["path"]) for m in res))
 check("carpeta inexistente no rompe", lm.scan_models(["Z:\\nada\\aqui"]) == [])
 
-srv_exe = lm.find_llama_server(r"C:\Users\Rodolfo\source\repos\USBagent\bin\llama-server.exe")
+srv_exe = lm.find_llama_server(r"F:\source\repos\USBagent\bin\llama-server.exe")
 check("find_llama_server respeta la ruta configurada", srv_exe and srv_exe.lower().endswith("llama-server.exe"), srv_exe)
 check("find_llama_server con ruta mala no devuelve esa ruta", lm.find_llama_server("C:\\no\\existe\\llama-server.exe") != "C:\\no\\existe\\llama-server.exe")
 check("humaniza tamaños", lm.format_size(2383309920) == "2.2 GB" and lm.format_size(369358144) == "352 MB", (lm.format_size(2383309920), lm.format_size(369358144)))
