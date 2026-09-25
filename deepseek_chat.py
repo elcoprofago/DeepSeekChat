@@ -27,6 +27,7 @@ import theme
 
 TITULO = "DeepSeek Chat"
 TITULO_VENTANA = "DeepSeek Chat - © R.A. Sistemas - 2026"      # mismo formato que la ventana de USBagent
+ICONO = "asterisc.ico"      # junto a los .py; el mismo va embebido en el lanzador DeepSeekChat.exe
 GEOMETRIA_INICIAL = "1240x780"
 SIN_EFFORT = "(por defecto)"
 APPROVALS = {"ask": "Preguntar todo", "edits": "Editar sin preguntar", "all": "Todo sin preguntar"}
@@ -101,6 +102,12 @@ class App:
         self.meter = meter.TokenMeter()
 
         root.title(TITULO_VENTANA)
+        icono = os.path.join(dsapi.APP_DIR, ICONO)
+        if os.path.isfile(icono):
+            try:
+                root.iconbitmap(default=icono)       # default=: también lo heredan los diálogos
+            except tk.TclError:
+                pass
         root.geometry(fit_geometry(self.cfg["win_geometry"], virtual_screen(root)) or GEOMETRIA_INICIAL)
         root.minsize(860, 520)
         if self.cfg["win_zoomed"]:
@@ -243,7 +250,14 @@ class App:
         self.btn_send = ttk.Button(self.bottom, text="Enviar", width=9, command=self.on_send_click)
         self.btn_send.pack(side="left", anchor="s", padx=(8, 0))
         # solo se ve cuando el agente cortó por el tope de pasos: un clic y sigue, sin escribir nada
-        self.btn_continue = ttk.Button(self.bottom, text="Continuar", width=10, command=self.continue_run)
+        self.btn_continue = ttk.Button(self.bottom, text="Continuar", width=10, command=self.continue_run,
+                                       style="Continue.TButton")
+        # cartel chico en el centro del chat que titila mientras el botón está a la vista; un clic hace lo mismo
+        self.continue_flag = tk.Label(self.col, text="⏸  Tope de pasos: apretá «Continuar»", font=("Segoe UI", 10, "bold"),
+                                      bg=theme.LIMON, fg=theme.NEGRO, padx=14, pady=6, bd=1, relief="solid", cursor="hand2")
+        self.continue_flag.bind("<Button-1>", lambda e: self.continue_run())
+        self._blink_job = None
+        self._blink_on = True
         self.status = ttk.Frame(self.col, padding=(0, 0, 0, 6))
         self.tokens_lbl = ttk.Label(self.status, text="")
         self.tokens_lbl.pack(side="left")
@@ -1009,10 +1023,29 @@ class App:
 
     def _show_continue(self, show):
         self._can_continue = bool(show)
+        if self._blink_job is not None:
+            self.root.after_cancel(self._blink_job)
+            self._blink_job = None
         if show:
             self.btn_continue.pack(side="left", anchor="s", padx=(8, 0), before=self.btn_send)
+            self.continue_flag.place(in_=self.chat.frame, relx=0.5, rely=0.5, anchor="center")
+            self.continue_flag.lift()
+            self._blink_on = True
+            self._blink()
         else:
             self.btn_continue.pack_forget()
+            self.continue_flag.place_forget()
+
+    def _blink(self):
+        """Alterna los colores del cartel cada medio segundo (un destello por segundo: lejos del umbral de 3 por
+        segundo que puede disparar crisis fotosensibles)."""
+        try:
+            bg, fg = (theme.LIMON, theme.NEGRO) if self._blink_on else (theme.NEGRO, theme.LIMON)
+            self.continue_flag.configure(bg=bg, fg=fg)
+            self._blink_on = not self._blink_on
+            self._blink_job = self.root.after(500, self._blink)
+        except tk.TclError:       # la ventana se cerró con el cartel a la vista
+            self._blink_job = None
 
     def continue_run(self):
         """Retoma la tarea tras el tope de pasos. Lo que el usuario tenga escrito o adjunto queda intacto."""
@@ -1310,6 +1343,11 @@ def main():
     try:
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    try:
+        # sin identidad propia, la barra de tareas agrupa la ventana bajo pythonw.exe y muestra su ícono, no el nuestro
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DeepSeekChat")
     except Exception:
         pass
     root = tk.Tk()

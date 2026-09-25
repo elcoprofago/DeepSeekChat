@@ -1,13 +1,15 @@
 """Arma la carpeta portable de DeepSeek Chat (para copiar a un pendrive).
 
-Uso:   python build_portable.py [--out RUTA] [--llama-bin RUTA] [--sin-ucrt] [--sin-verificar]
+Uso:   python build_portable.py [--out RUTA] [--llama-bin RUTA] [--sin-ucrt] [--sin-exe] [--sin-verificar]
 
 Resultado (por defecto en dist\\DeepSeekChat):
-    app\\       los .py de la aplicación (sin tests ni este script)
+    app\\       los .py de la aplicación (sin tests ni este script) y su ícono
     runtime\\   un Python recortado y propio (tkinter incluido), sin pip ni site-packages
     bin\\       llama-server.exe y sus DLL, para los modelos locales
     Models\\    aquí van los .gguf (no se toca al rearmar)
     data\\      configuración, sesiones, key cifrada, logs (no se toca al rearmar)
+    DeepSeekChat.exe  lanzador nativo con el ícono (se compila de launcher\\ con las Build Tools de Visual Studio;
+                      si no están, se avisa y queda solo el .bat, que hace lo mismo)
     portable.flag, DeepSeekChat.bat, DeepSeekChat-consola.bat, Diagnostico.bat, LEEME.txt
 
 Seguridad: app\\, runtime\\ y bin\\ llevan un archivo marcador; solo se reemplazan si lo tienen. Si existe una carpeta
@@ -24,6 +26,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MARKER = ".build_portable"
+ICON = "asterisc.ico"
 
 APP_EXCLUDE = ("test_*.py", "build_portable.py", "__pycache__")
 LIB_EXCLUDE_DIRS = {"site-packages", "test", "idlelib", "turtledemo", "ensurepip", "venv", "pydoc_data"}
@@ -118,7 +121,7 @@ def fill_app(dst):
     n = 0
     for name in sorted(os.listdir(HERE)):
         p = os.path.join(HERE, name)
-        if os.path.isfile(p) and (name.endswith(".py") or name.endswith(".pyw")):
+        if os.path.isfile(p) and (name.endswith(".py") or name.endswith(".pyw") or name == ICON):
             if any(fnmatch.fnmatch(name, pat) for pat in APP_EXCLUDE):
                 continue
             shutil.copy2(p, os.path.join(dst, name))
@@ -168,6 +171,53 @@ def make_bin_filler(src, ucrt):
     return fill
 
 
+def find_vcvars():
+    """vcvars64.bat de alguna instalación de Visual Studio / Build Tools con el compilador de C++, o None."""
+    vswhere = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Microsoft Visual Studio",
+                           "Installer", "vswhere.exe")
+    if not os.path.isfile(vswhere):
+        return None
+    r = subprocess.run([vswhere, "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                        "-property", "installationPath"], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        bat = os.path.join(line.strip(), "VC", "Auxiliary", "Build", "vcvars64.bat")
+        if os.path.isfile(bat):
+            return bat
+    return None
+
+
+def build_launcher(out):
+    """Compila launcher\\DeepSeekChat.c con el ícono embebido y lo deja como out\\DeepSeekChat.exe. Devuelve True si lo logró."""
+    src = os.path.join(HERE, "launcher")
+    vcvars = find_vcvars()
+    if not vcvars:
+        say("  AVISO: no hay Build Tools de Visual Studio con C++; se arma sin DeepSeekChat.exe (queda DeepSeekChat.bat).")
+        return False
+    tmp = os.path.join(out, "launcher.tmp")
+    if os.path.exists(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    # un .bat intermedio: vcvars64 tiene que correr en el mismo cmd que rc y cl, y así no hay que pelear con comillas
+    script = os.path.join(tmp, "compilar.bat")
+    write_text(script, (
+        "@echo off\r\n"
+        f'call "{vcvars}" >nul || exit /b 1\r\n'
+        f'cd /d "{src}" || exit /b 1\r\n'
+        f'rc /nologo /fo "{tmp}\\DeepSeekChat.res" DeepSeekChat.rc || exit /b 1\r\n'
+        f'cl /nologo /O1 /MT /utf-8 /W3 /D_CRT_SECURE_NO_WARNINGS DeepSeekChat.c "{tmp}\\DeepSeekChat.res" '
+        f'/Fo"{tmp}\\\\" /Fe"{tmp}\\DeepSeekChat.exe" /link /SUBSYSTEM:WINDOWS user32.lib || exit /b 1\r\n'), newline="")
+    r = subprocess.run(["cmd", "/d", "/c", script], capture_output=True, text=True, encoding="oem", errors="replace")
+    exe = os.path.join(tmp, "DeepSeekChat.exe")
+    if r.returncode != 0 or not os.path.isfile(exe):
+        say(f"  AVISO: no se pudo compilar DeepSeekChat.exe (código {r.returncode}); queda DeepSeekChat.bat.\n"
+            + (r.stdout + r.stderr).strip())
+        return False
+    shutil.copy2(exe, os.path.join(out, "DeepSeekChat.exe"))
+    shutil.rmtree(tmp)
+    say(f"  DeepSeekChat.exe: {os.path.getsize(os.path.join(out, 'DeepSeekChat.exe')) // 1024} KB, con el ícono embebido")
+    return True
+
+
 LAUNCHER = "@echo off\r\nstart \"\" \"%~dp0runtime\\pythonw.exe\" -I \"%~dp0app\\DeepSeekChat.pyw\"\r\n"
 LAUNCHER_CONSOLE = ("@echo off\r\n\"%~dp0runtime\\python.exe\" -I \"%~dp0app\\DeepSeekChat.pyw\"\r\n"
                     "echo.\r\necho (la aplicacion se cerro; codigo %errorlevel%)\r\npause\r\n")
@@ -177,7 +227,7 @@ DIAGNOSTICO = ("@echo off\r\n\"%~dp0runtime\\python.exe\" -I \"%~dp0app\\selftes
 LEEME = """DeepSeek Chat portable
 ======================
 
-Doble clic en DeepSeekChat.bat.
+Doble clic en DeepSeekChat.exe (DeepSeekChat.bat hace lo mismo, por si el .exe faltara).
 
 - Todo lo que la aplicacion guarda (configuracion, sesiones, tu API key cifrada, registros) queda en la carpeta data\\
   de esta misma carpeta. No escribe en el equipo donde la enchufes (ni en %APPDATA%).
@@ -211,6 +261,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(HERE, "dist", "DeepSeekChat"))
     ap.add_argument("--llama-bin", default="")
     ap.add_argument("--sin-ucrt", action="store_true", help="no copiar el UCRT local (Windows 10 y 11 ya lo traen)")
+    ap.add_argument("--sin-exe", action="store_true", help="no compilar el lanzador DeepSeekChat.exe")
     ap.add_argument("--sin-verificar", action="store_true", help="no correr el autodiagnóstico sobre lo armado")
     a = ap.parse_args()
 
@@ -247,6 +298,8 @@ def main():
     write_text(os.path.join(out, "DeepSeekChat-consola.bat"), LAUNCHER_CONSOLE, newline="")
     write_text(os.path.join(out, "Diagnostico.bat"), DIAGNOSTICO, newline="")
     write_text(os.path.join(out, "LEEME.txt"), LEEME.replace("\n", "\r\n"))
+    if not a.sin_exe:
+        build_launcher(out)
     say(f"Armado en {time.time() - t0:.1f} s")
 
     total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _d, fs in os.walk(out) for f in fs)

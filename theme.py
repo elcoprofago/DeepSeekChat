@@ -14,6 +14,12 @@ THEMES = {
 }
 
 
+# «Continuar» tiene que saltar a la vista en cualquier tema: amarillo limón con letra negra, igual en claro y oscuro.
+LIMON = "#fff44f"
+LIMON_ACTIVO = "#ffe61a"
+NEGRO = "#000000"
+
+
 def pick(name):
     return THEMES.get(name, THEMES["claro"])
 
@@ -35,6 +41,10 @@ def apply_styles(root, t):
     s.map("TButton", background=[("active", t["border"]), ("disabled", t["bg"])], foreground=[("disabled", t["muted"])])
     s.configure("Accent.TButton", background=t["accent"], foreground=t["accent_fg"])
     s.map("Accent.TButton", background=[("active", t["accent"]), ("disabled", t["border"])],
+          foreground=[("disabled", t["muted"])])
+    s.configure("Continue.TButton", background=LIMON, foreground=NEGRO, bordercolor=NEGRO,
+                font=("Segoe UI", 10, "bold"))
+    s.map("Continue.TButton", background=[("active", LIMON_ACTIVO), ("disabled", t["border"])],
           foreground=[("disabled", t["muted"])])
     s.configure("Tool.TButton", padding=(6, 3))
     s.configure("TCombobox", fieldbackground=t["panel"], background=t["panel"], foreground=t["fg"],

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import tkinter as tk
+from tkinter import ttk
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -505,7 +506,28 @@ check("el agente corta por el tope de pasos", terminar())
 root.update()
 check("EFECTO: tras el tope aparece el botón Continuar, a la vista", app.btn_continue.winfo_ismapped() and app.btn_continue.winfo_viewable())
 check("el aviso del chat nombra el botón", "Continuar" in app.chat.get_text(), app.chat.get_text()[-200:])
+estilo = ttk.Style(root)
+check("EFECTO: el botón Continuar es amarillo limón con letra negra",
+      str(app.btn_continue.cget("style")) == "Continue.TButton"
+      and estilo.lookup("Continue.TButton", "background") == theme.LIMON
+      and estilo.lookup("Continue.TButton", "foreground") == theme.NEGRO)
+check("EFECTO: el cartel central está a la vista sobre el chat",
+      app.continue_flag.winfo_ismapped() and app.continue_flag.winfo_viewable() and "Continuar" in app.continue_flag.cget("text"))
+fx, fy = app.continue_flag.winfo_rootx() + app.continue_flag.winfo_width() // 2, app.continue_flag.winfo_rooty() + app.continue_flag.winfo_height() // 2
+cx, cy = app.chat.frame.winfo_rootx() + app.chat.frame.winfo_width() // 2, app.chat.frame.winfo_rooty() + app.chat.frame.winfo_height() // 2
+check("el cartel está centrado en el chat", abs(fx - cx) <= 2 and abs(fy - cy) <= 2, (fx, fy, cx, cy))
+check("EFECTO: lo de arriba en el centro del chat es el cartel, no el texto", root.winfo_containing(fx, fy) == app.continue_flag,
+      root.winfo_containing(fx, fy))
+colores = set()
+t_fin = time.time() + 1.3
+while time.time() < t_fin:
+    root.update()
+    colores.add(app.continue_flag.cget("bg"))
+    time.sleep(0.05)
+check("EFECTO: el cartel titila (alterna limón y negro)", colores == {theme.LIMON, theme.NEGRO}, colores)
+shot("continuar.png")
 app.btn_continue.invoke()
+check("al seguir, el cartel se va y deja de titilar", not app.continue_flag.winfo_ismapped() and app._blink_job is None)
 check("Continuar (el botón real) arranca el agente", app.busy)
 check("el agente termina la tarea", terminar())
 root.update()
@@ -521,13 +543,15 @@ terminar()
 root.update()
 check("premisa: volvió a cortar y el botón está", app.btn_continue.winfo_ismapped())
 guion.pasos = [dsapi.ApiError("Sin conexión")]
-app.btn_continue.invoke()
+app.continue_flag.event_generate("<Button-1>", x=5, y=5)
+check("un clic en el cartel hace lo mismo que el botón", app.busy)
 terminar()
 root.update()
 check("si Continuar falla por la red, el botón queda para reintentar y el texto no ensucia el campo",
       app.btn_continue.winfo_ismapped() and app.input.get("1.0", "end-1c") == "", app.input.get("1.0", "end-1c"))
 app._activate(app._blank_session(""))
 check("al cambiar de sesión el botón se esconde", not app.btn_continue.winfo_ismapped())
+check("CONTROL: y el cartel también, sin quedar titilando", not app.continue_flag.winfo_ismapped() and app._blink_job is None)
 app.max_steps = ag.DEFAULT_MAX_STEPS
 app.new_session()
 
