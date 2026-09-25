@@ -118,6 +118,10 @@ check("denso a 32K: caché KV q8 con flash attention", a32[a32.index("-ctk") + 1
 check("CONTROL: denso a 16K sin q8", "-ctk" not in a16, a16)
 glm = lm.server_args(r"X:\m\GLM-4.7-Flash-Q4_K_M.gguf", 65536, "off")
 check("GLM (MoE): sin q8 aun a 64K, lotes de 2048, razonamiento off", "-ctk" not in glm and glm[glm.index("-ub") + 1] == "2048" and glm[glm.index("--reasoning") + 1] == "off", glm)
+q36 = lm.server_args(r"X:\m\Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf", 65536, lm.reasoning_for("Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"))
+check("Qwen3.6-35B-A3B (MoE): lotes de 2048, sin q8, sin razonar por defecto",
+      "-ctk" not in q36 and q36[q36.index("-ub") + 1] == "2048" and q36[q36.index("--reasoning") + 1] == "off", q36)
+check("CONTROL: un Qwen3.6 denso no hereda el perfil MoE", "-ub" not in lm.server_args("Qwen3.6-27B-Q4_K_M.gguf", 32768))
 check("Gemma 4: sin q8 a 128K", "-ctk" not in lm.server_args(r"X:\gemma-4-E4B-it-Q4_K_M.gguf", 131072))
 check("reasoning_for: perfil por defecto y elección de la barra",
       lm.reasoning_for("Qwen3.5-9B-Q4_K_M.gguf") == "off" and lm.reasoning_for("gemma-4-E4B-it.gguf") == "on"

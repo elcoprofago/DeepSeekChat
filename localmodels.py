@@ -136,6 +136,8 @@ def scan_models(dirs, max_depth=3):
 #   moe:       lotes de 2048: GLM-4.7-Flash procesa el prompt a 451 tok/s en vez de 191.
 # El primer patrón que aparece en el nombre del archivo (en minúsculas) gana.
 PROFILES = (
+    # MoE: 31 tok/s hasta 64K; 12/12 sin razonar en 151 s, 11/12 razonando en 1724 s. El q8 no cambia nada.
+    ("qwen3.6-35b-a3b", {"reasoning": "off", "kv_q8": False, "moe": True}),
     ("glm-4.7-flash", {"reasoning": "off", "kv_q8": False, "moe": True}),
     ("gemma-4", {"reasoning": "on", "kv_q8": False, "moe": False}),
     ("qwen3.5", {"reasoning": "off", "kv_q8": True, "moe": False}),   # con razonamiento se enlaza en bucles de 8000 tokens
