@@ -396,6 +396,32 @@ check("effort se guarda en la sesión", app.sess.effort == "high")
 disco = sessions.SessionStore(cfg.sessions_dir).load(app.sess.id)
 check("y en disco (la sesión tiene mensajes)", disco.effort == "high" and disco.model == "deepseek-flash", (disco.effort, disco.model))
 
+# local con interruptor de razonamiento: la barra lo ofrece, y lo elegido no viaja a DeepSeek
+with open(os.path.join(mdir, "gemma-4-E4B-de-mentira.gguf"), "wb") as f:
+    f.truncate(3 * 1024 * 1024)
+app.rescan_models()
+gem = [v for v in app.model_cb.cget("values") if v.startswith("[local] gemma-4-E4B-de-mentira")]
+app.model_var.set(gem[0])
+app.on_model_change()
+check("local con interruptor: la barra ofrece razonar / sin razonar",
+      str(app.effort_cb.cget("state")) != "disabled" and list(app.effort_cb.cget("values")) == [dc.SIN_EFFORT, "razonar", "sin razonar"],
+      app.effort_cb.cget("values"))
+app.effort_var.set("sin razonar")
+app.on_effort_change()
+entrada = app._entry_for(app.sess.model)
+check("sin razonar -> --reasoning off; (por defecto) -> el del perfil (Gemma: on)",
+      localmodels.reasoning_for(entrada["path"], app.sess.effort) == "off" and localmodels.reasoning_for(entrada["path"], "") == "on")
+app.model_var.set("deepseek-flash")
+app.on_model_change()
+check("CONTROL: al volver a DeepSeek la barra no muestra el valor local", app.effort_var.get() == dc.SIN_EFFORT, app.effort_var.get())
+fab, app._stream_factory = app._stream_factory, None
+cuerpo = json.loads(app._make_stream(app._entry_for("deepseek-flash"), app.sess, None, [], None, None)._req.data)
+check("EFECTO: el «sin razonar» del local no se manda a DeepSeek como reasoning_effort", "reasoning_effort" not in cuerpo, cuerpo.get("reasoning_effort"))
+app.sess.effort = "high"
+cuerpo = json.loads(app._make_stream(app._entry_for("deepseek-flash"), app.sess, None, [], None, None)._req.data)
+check("CONTROL: un esfuerzo válido de DeepSeek sí viaja", cuerpo.get("reasoning_effort") == "high", cuerpo.get("reasoning_effort"))
+app._stream_factory = fab
+
 # modelo local que ya no está (pendrive desconectado): la sesión no se pierde ni se cae
 app.sess.model = localmodels.MODEL_ID_PREFIX + os.path.join(tmp, "pendrive_desconectado", "x.gguf")
 app._refresh_model_widgets()

@@ -29,8 +29,13 @@ APP_EXCLUDE = ("test_*.py", "build_portable.py", "__pycache__")
 LIB_EXCLUDE_DIRS = {"site-packages", "test", "idlelib", "turtledemo", "ensurepip", "venv", "pydoc_data"}
 DLL_EXCLUDE = ("_test*", "_ctypes_test*", "*.ico", "*.cat")
 LLAMA_KEEP = ("llama-server.exe", "llama-server-impl.dll", "llama.dll", "llama-common.dll", "mtmd.dll", "ggml*.dll",
-              "libomp.dll", "msvcp140*.dll", "vcruntime140*.dll", "LICENSE*")
+              "libomp*.dll", "msvcp140*.dll", "vcruntime140*.dll", "cublas*.dll", "cudart*.dll", "LICENSE*")
+VC_RUNTIME = ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+# Primero el build con CUDA: con una placa NVIDIA el modelo corre en la GPU (5 a 12 veces más rápido, medido); sin
+# ella ggml-cuda.dll no carga y queda la CPU. El de USBagent es solo CPU (el pendrive de WinPE no tiene drivers de GPU).
 LLAMA_CANDIDATES = (
+    r"E:\llama-server",
+    r"C:\llama-server",
     r"F:\source\repos\USBagent\bin",
     r"C:\Users\Rodolfo\source\repos\USBagent\bin",
     r"E:\Users\Rodolfo\source\repos\USBagent\bin",
@@ -146,6 +151,17 @@ def make_bin_filler(src, ucrt):
         n = copy_matching(src, dst, patterns=LLAMA_KEEP)
         if not os.path.isfile(os.path.join(dst, "llama-server.exe")):
             die(f"no hay llama-server.exe en {src}")
+        # el build CUDA oficial no trae el runtime de VC++: se toma de otro build para no depender del equipo destino
+        for dll in VC_RUNTIME:
+            if not os.path.isfile(os.path.join(dst, dll)):
+                orig = next((os.path.join(c, dll) for c in LLAMA_CANDIDATES if os.path.isfile(os.path.join(c, dll))), None)
+                if orig:
+                    shutil.copy2(orig, os.path.join(dst, dll))
+                    n += 1
+                else:
+                    say(f"  AVISO: bin\\ sin {dll}; depende del runtime de VC++ del equipo destino.")
+        if os.path.isfile(os.path.join(dst, "ggml-cuda.dll")):
+            say("  bin: build con CUDA (usa la GPU NVIDIA si hay; si no, la CPU)")
         if ucrt:
             copy_ucrt(ucrt, dst)
         say(f"  bin: {n} archivos de llama.cpp" + (", UCRT local" if ucrt else ", SIN UCRT local"))

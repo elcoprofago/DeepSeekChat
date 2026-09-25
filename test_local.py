@@ -110,6 +110,23 @@ try:
 finally:
     lm.memory_status = orig_status
 
+# --- perfiles por familia: argumentos de afinado
+a16 = lm.server_args(r"X:\m\Qwen3-4B-Instruct-2507-Q4_K_S.gguf", 16384)
+a32 = lm.server_args(r"X:\m\Qwen3-4B-Instruct-2507-Q4_K_S.gguf", 32768)
+check("nunca -ngl: la GPU la reparte --fit", "-ngl" not in a16 + a32, a32)
+check("denso a 32K: caché KV q8 con flash attention", a32[a32.index("-ctk") + 1] == "q8_0" and "-ctv" in a32 and a32[a32.index("-fa") + 1] == "on", a32)
+check("CONTROL: denso a 16K sin q8", "-ctk" not in a16, a16)
+glm = lm.server_args(r"X:\m\GLM-4.7-Flash-Q4_K_M.gguf", 65536, "off")
+check("GLM (MoE): sin q8 aun a 64K, lotes de 2048, razonamiento off", "-ctk" not in glm and glm[glm.index("-ub") + 1] == "2048" and glm[glm.index("--reasoning") + 1] == "off", glm)
+check("Gemma 4: sin q8 a 128K", "-ctk" not in lm.server_args(r"X:\gemma-4-E4B-it-Q4_K_M.gguf", 131072))
+check("reasoning_for: perfil por defecto y elección de la barra",
+      lm.reasoning_for("Qwen3.5-9B-Q4_K_M.gguf") == "off" and lm.reasoning_for("gemma-4-E4B-it.gguf") == "on"
+      and lm.reasoning_for("Qwen3.5-9B-Q4_K_M.gguf", "razonar") == "on" and lm.reasoning_for("gemma-4-E4B-it.gguf", "sin razonar") == "off")
+check("modelos sin interruptor: None aunque la barra traiga algo (no se pasa --reasoning)",
+      lm.reasoning_for("Qwen3-4B-Thinking-2507.gguf", "sin razonar") is None and lm.reasoning_for("DeepSeek-R1-0528-Qwen3-8B.gguf") is None
+      and "--reasoning" not in lm.server_args("Qwen3-4B-Thinking-2507.gguf", 16384, None))
+check("un esfuerzo de DeepSeek guardado en la sesión no cambia el razonamiento local", lm.reasoning_for("Qwen3.5-9B.gguf", "high") == "off")
+
 MODEL = r"E:\Models\Nvidia\Qwen2.5-0.5B-Instruct-Q3_K_L.gguf"
 if not os.path.isfile(MODEL) or not srv_exe:
     print("(se omite la parte del servidor real: falta el modelo o llama-server)")
@@ -163,6 +180,54 @@ else:
     check("EFECTO: matar al padre a la fuerza mata a llama-server (Job Object)", not vivo_despues)
     if vivo_despues:
         subprocess.run(["taskkill", "/F", "/PID", str(hijo)], capture_output=True)
+
+# --- build con CUDA: el modelo va a la GPU sin -ngl, y sin GPU visible cae a la CPU sin romperse
+CUDA_EXE = r"E:\llama-server\llama-server.exe"
+if not os.path.isfile(MODEL) or not os.path.isfile(CUDA_EXE):
+    print("(se omite la parte CUDA: falta el modelo o E:\\llama-server)")
+else:
+    def vram_mb():
+        """VRAM total usada según nvidia-smi, o None. Por proceso no sirve: en Windows (WDDM) devuelve [N/A],
+        y el log de este build no dice cuántas capas subió. Se compara antes y después de cargar."""
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                                 capture_output=True, text=True, timeout=20)
+            return int(out.stdout.split()[0]) if out.returncode == 0 else None
+        except (OSError, ValueError, IndexError):
+            return None
+    logc = os.path.join(d, "logs_cuda")
+    s = lm.LocalServer(CUDA_EXE, logc, ctx=4096)
+    antes = vram_mb()
+    base = s.ensure(MODEL, reasoning="off")
+    despues = vram_mb()
+    check("CUDA: nvidia-smi responde (si no, las pruebas de VRAM no valen)", antes is not None and despues is not None)
+    check("CUDA: cargar el modelo sube la VRAM (está en la GPU)", s.alive() and (despues or 0) - (antes or 0) > 200, (antes, despues))
+    check("CUDA: los argumentos no llevan -ngl", "-ngl" not in s.args and "--reasoning" in s.args, s.args)
+    body = json.dumps({"model": "x", "messages": [{"role": "user", "content": "Decí solo la palabra: hola"}], "max_tokens": 16}).encode()
+    r = json.loads(urllib.request.urlopen(urllib.request.Request(base + "/chat/completions", data=body, headers={"Content-Type": "application/json"}), timeout=120).read())
+    check("EFECTO: contesta desde la GPU", bool(r["choices"][0]["message"]["content"].strip()), r)
+    pid = s.proc.pid
+    s.ensure(MODEL, reasoning="off")
+    check("mismo razonamiento: reutiliza el proceso", s.proc.pid == pid)
+    s.ensure(MODEL, reasoning="on")
+    check("cambiar el razonamiento reinicia el servidor", s.proc.pid != pid and s.alive())
+    s.stop()
+    viejo = os.environ.get("CUDA_VISIBLE_DEVICES")
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"       # sin GPU visible: lo más parecido a un equipo sin NVIDIA que se puede probar acá
+    try:
+        antes = vram_mb()
+        base = s.ensure(MODEL)
+        despues = vram_mb()
+        r = json.loads(urllib.request.urlopen(urllib.request.Request(base + "/chat/completions", data=body, headers={"Content-Type": "application/json"}), timeout=120).read())
+        check("sin GPU visible: el build CUDA corre en la CPU (la VRAM no sube) y contesta",
+              antes is not None and despues is not None and despues - antes < 100 and bool(r["choices"][0]["message"]["content"].strip()),
+              (antes, despues, r))
+    finally:
+        s.stop()
+        if viejo is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = viejo
 
 shutil.rmtree(d, ignore_errors=True)
 print("\nFALLAS:", fallas if fallas else "ninguna")

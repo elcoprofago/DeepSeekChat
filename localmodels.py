@@ -124,6 +124,60 @@ def scan_models(dirs, max_depth=3):
     return sorted(found.values(), key=lambda m: m["name"].lower())
 
 
+# ---------------------------------------------------------------- perfiles por familia de modelo
+#
+# Medidos en la máquina de desarrollo (Ryzen 5 5600G, 48 GB, RTX 5050 de 8 GB) el 24/9/2026, con llama-server CUDA
+# b9775 y --fit (llama.cpp decide cuántas capas y expertos van a la GPU según la VRAM libre).
+#   reasoning: None = el modelo no tiene interruptor (o piensa siempre, o nunca): no se pasa --reasoning y el
+#              selector de razonamiento queda deshabilitado. "on"/"off" = valor por defecto, cambiable en la barra.
+#   kv_q8:     caché KV en 8 bits desde 32K de contexto. En modelos densos deja la caché entera en la GPU
+#              (Qwen3-4B a 32K: 77,6 tok/s con q8 contra 26 sin). En GLM (MoE) hunde el proceso del prompt
+#              (31,7 contra 191 tok/s) y en Gemma 4 no hace falta (73 tok/s hasta 128K sin él).
+#   moe:       lotes de 2048: GLM-4.7-Flash procesa el prompt a 451 tok/s en vez de 191.
+# El primer patrón que aparece en el nombre del archivo (en minúsculas) gana.
+PROFILES = (
+    ("glm-4.7-flash", {"reasoning": "off", "kv_q8": False, "moe": True}),
+    ("gemma-4", {"reasoning": "on", "kv_q8": False, "moe": False}),
+    ("qwen3.5", {"reasoning": "off", "kv_q8": True, "moe": False}),   # con razonamiento se enlaza en bucles de 8000 tokens
+    ("thinking", {"reasoning": None, "kv_q8": True, "moe": False}),   # Qwen3-*-Thinking: piensa siempre
+    ("deepseek-r1", {"reasoning": None, "kv_q8": True, "moe": False}),
+)
+DEFAULT_PROFILE = {"reasoning": None, "kv_q8": True, "moe": False}
+KV_Q8_FROM = 32768
+REASONING_CHOICES = {"razonar": "on", "sin razonar": "off"}    # lo que muestra la barra -> valor de --reasoning
+
+
+def profile_for(model_path):
+    low = os.path.basename(model_path).lower()
+    for pat, prof in PROFILES:
+        if pat in low:
+            return dict(prof)
+    return dict(DEFAULT_PROFILE)
+
+
+def reasoning_for(model_path, choice=""):
+    """El valor de --reasoning para ese modelo ("on"/"off") o None si el modelo no tiene interruptor.
+    choice: lo elegido en la barra (una clave de REASONING_CHOICES); vacío o desconocido = el del perfil."""
+    default = profile_for(model_path)["reasoning"]
+    if default is None:
+        return None
+    return REASONING_CHOICES.get(choice, default)
+
+
+def server_args(model_path, ctx, reasoning=None):
+    """Los argumentos de afinado para llama-server (sin ejecutable, modelo, host ni puerto).
+    Sin -ngl: --fit (activo por defecto) reparte capas y expertos entre GPU y CPU. Sin GPU usable queda todo en la CPU."""
+    prof = profile_for(model_path)
+    args = ["-c", str(int(ctx))]
+    if prof["kv_q8"] and int(ctx) >= KV_Q8_FROM:
+        args += ["-ctk", "q8_0", "-ctv", "q8_0", "-fa", "on"]
+    if prof["moe"]:
+        args += ["-b", "2048", "-ub", "2048"]
+    if reasoning in ("on", "off"):
+        args += ["--reasoning", reasoning]
+    return args
+
+
 def find_llama_server(configured=""):
     """Ruta a llama-server.exe o None. Orden: la configurada, y luego bin\\ junto al programa."""
     cands = [configured] if configured else []
@@ -191,6 +245,7 @@ class LocalServer:
         self.exe, self.log_dir, self.ctx, self.threads = exe, log_dir, int(ctx), threads
         self.proc = None
         self.model = None
+        self.args = None
         self.port = None
         self._job = _make_kill_on_close_job()
         self._log = None
@@ -211,11 +266,11 @@ class LocalServer:
         except OSError:
             return ""
 
-    def ensure(self, model_path, ctx=None, cancel=None, timeout=300):
+    def ensure(self, model_path, ctx=None, cancel=None, timeout=300, reasoning=None):
         """Deja corriendo el servidor con ese modelo y devuelve la URL base. Bloquea hasta que responde /health.
-        cancel: threading.Event opcional para abortar la espera."""
+        cancel: threading.Event opcional para abortar la espera. reasoning: "on"/"off"/None (ver reasoning_for)."""
         ctx = int(ctx or self.ctx)
-        if self.alive() and self.model == (os.path.normcase(model_path), ctx):
+        if self.alive() and self.model == (os.path.normcase(model_path), ctx, reasoning):
             return self.base
         self.stop()
         if not os.path.isfile(self.exe):
@@ -225,10 +280,11 @@ class LocalServer:
         check_memory(model_path)
         os.makedirs(self.log_dir, exist_ok=True)
         self.port = _free_port()
-        args = [self.exe, "-m", model_path, "--host", "127.0.0.1", "--port", str(self.port), "-c", str(ctx),
-                "-np", "1", "--jinja", "-ngl", "0", "--no-webui"]
+        args = [self.exe, "-m", model_path, "--host", "127.0.0.1", "--port", str(self.port),
+                "-np", "1", "--jinja", "--no-webui"] + server_args(model_path, ctx, reasoning)
         if self.threads:
             args += ["-t", str(self.threads)]
+        self.args = args
         self._log = open(self.log_path, "wb")
         flags = 0x08000000   # CREATE_NO_WINDOW
         try:
@@ -241,7 +297,7 @@ class LocalServer:
                 ctypes.windll.kernel32.AssignProcessToJobObject(wintypes.HANDLE(self._job), wintypes.HANDLE(int(self.proc._handle)))
             except Exception:
                 pass
-        self.model = (os.path.normcase(model_path), ctx)
+        self.model = (os.path.normcase(model_path), ctx, reasoning)
         t0 = time.time()
         url = f"http://127.0.0.1:{self.port}/health"
         while True:

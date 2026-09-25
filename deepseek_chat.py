@@ -428,7 +428,7 @@ class App:
                 return {**m, "kind": "remote"}
         for m in self.local_models:
             if m["id"] == mid:
-                return {**m, "kind": "local", "efforts": [], "context": int(self.cfg["local_ctx"])}
+                return self._local_entry(m)
         if mid.startswith(localmodels.MODEL_ID_PREFIX):
             path = mid[len(localmodels.MODEL_ID_PREFIX):]
             base = os.path.basename(path)
@@ -436,7 +436,7 @@ class App:
                 # el pendrive puede montarse con otra letra de unidad: el mismo archivo, hallado en otra carpeta
                 same = [m for m in self.local_models if os.path.basename(m["path"]).lower() == base.lower()]
                 if len(same) == 1:
-                    return {**same[0], "kind": "local", "efforts": [], "context": int(self.cfg["local_ctx"])}
+                    return self._local_entry(same[0])
             return {"id": mid, "kind": "local", "name": base[:-5] if base.lower().endswith(".gguf") else base, "path": path,
                     "size": 0, "efforts": [], "context": int(self.cfg["local_ctx"]), "missing": not os.path.isfile(path)}
         return {"id": mid, "kind": "remote", "name": mid, "efforts": [], "context": 0}
@@ -450,7 +450,13 @@ class App:
 
     def _all_entries(self):
         return [{**m, "kind": "remote"} for m in self.remote_models] + \
-               [{**m, "kind": "local", "efforts": [], "context": int(self.cfg["local_ctx"])} for m in self.local_models]
+               [self._local_entry(m) for m in self.local_models]
+
+    def _local_entry(self, m):
+        """Un modelo local como entrada del selector. Si su familia tiene interruptor de razonamiento, la barra lo
+        ofrece en el lugar del esfuerzo de DeepSeek («(por defecto)» = lo que dice su perfil)."""
+        efforts = list(localmodels.REASONING_CHOICES) if localmodels.reasoning_for(m["path"]) is not None else []
+        return {**m, "kind": "local", "efforts": efforts, "context": int(self.cfg["local_ctx"])}
 
     def _refresh_model_widgets(self):
         entries = self._all_entries()
@@ -465,7 +471,7 @@ class App:
 
     def _refresh_effort_widgets(self):
         entry = self._entry_for(self.sess.model) if self.sess and self.sess.model else None
-        if entry is None or entry["kind"] == "local":
+        if entry is None or (entry["kind"] == "local" and not entry["efforts"]):
             self.effort_cb.configure(values=["—"], state="disabled")
             self.effort_var.set("—")
             return
@@ -1080,7 +1086,8 @@ class App:
         if entry["kind"] == "local":
             mt = max(512, min(int(self.cfg["max_tokens"]), int(self.cfg["local_ctx"]) // 2))
             return dsapi.ChatStream(None, entry["name"], msgs, None, mt, base=base, tools=tools, timeout=LOCAL_TIMEOUT)
-        return dsapi.ChatStream(self.cfg.api_key, entry["id"], msgs, s.effort or None, self.cfg["max_tokens"], tools=tools)
+        effort = s.effort if s.effort in (entry["efforts"] or []) else None   # el de un modelo local no viaja a DeepSeek
+        return dsapi.ChatStream(self.cfg.api_key, entry["id"], msgs, effort, self.cfg["max_tokens"], tools=tools)
 
     def _work(self, s, entry, toolbox, n0, text, files, cancel):
         outcome, error = None, None
@@ -1105,7 +1112,8 @@ class App:
                 self.post(lambda: self._set_state("Cargando el modelo local (puede tardar un rato)…"))
                 if entry.get("missing"):
                     raise localmodels.LocalError(f"No se encuentra el modelo {entry['path']} (¿está conectado el pendrive?).")
-                base = self._local_server().ensure(entry["path"], int(self.cfg["local_ctx"]), cancel)
+                base = self._local_server().ensure(entry["path"], int(self.cfg["local_ctx"]), cancel,
+                                                   reasoning=localmodels.reasoning_for(entry["path"], s.effort))
             budget = int(self.cfg["local_ctx"]) * 3 if entry["kind"] == "local" else REMOTE_BUDGET
             agent = ag.Agent(lambda msgs, tools: self._make_stream(entry, s, base, msgs, tools, toolbox), toolbox, max_steps=self.max_steps, budget_chars=budget)
             self.agent = agent
