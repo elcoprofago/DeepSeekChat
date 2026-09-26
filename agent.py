@@ -11,27 +11,74 @@ import json
 import agent_tools as at
 
 OMITTED = "[resultado anterior omitido para ahorrar contexto]"
+# Lo que queda en el historial en lugar de argumentos que no son JSON (una respuesta cortada por el límite de tokens).
+# Si quedara el texto roto, llama-server vuelve a leer el historial en cada pedido, no puede, y contesta 500 para
+# siempre: la sesión queda inservible.
+BROKEN_ARGS = "{}"
 REPEAT_WARN = 3
 REPEAT_ABORT = 5
 DEFAULT_MAX_STEPS = 60
+# Modelos locales: el presupuesto de historial sale de la ventana de contexto real, no de un número fijo de caracteres.
+# Caracteres por token de arranque (a propósito bajo: sobra lugar), recalibrado con los prompt_tokens de cada respuesta.
+DEFAULT_CHARS_PER_TOKEN = 2.5
+CTX_MARGIN = 0.92          # la plantilla de chat agrega tokens que no se ven en los caracteres
+MIN_BUDGET_CHARS = 4000
 # Herramientas que cambian el estado del proyecto: tras una que salió bien, repetir una lectura o volver a correr
 # los tests ya no es repetir en vano (el resultado puede ser otro), así que el contador de repeticiones empieza de cero.
 STATE_CHANGING = {"write_file", "edit_file", "delete_path", "run_command"}
 
 
+def messages_size(msgs):
+    return sum(len(m.get("content") or "") + sum(len(c["function"]["arguments"]) for c in m.get("tool_calls") or []) for m in msgs)
+
+
+def args_ok(raw):
+    """True si los argumentos de una llamada son un objeto JSON (vacío cuenta como {})."""
+    if raw is None or not str(raw).strip():
+        return True
+    try:
+        return isinstance(json.loads(raw), dict)
+    except ValueError:
+        return False
+
+
+def _shrink_args(raw):
+    """Argumentos de una llamada vieja con los textos largos (el contenido de un archivo escrito) reemplazados por el
+    aviso. Sigue siendo JSON válido: la llamada se ve igual, solo sin el texto."""
+    try:
+        v = json.loads(raw)
+    except ValueError:
+        return BROKEN_ARGS
+    if not isinstance(v, dict):
+        return raw
+    return json.dumps({k: (OMITTED if isinstance(x, str) and len(x) > 2 * len(OMITTED) else x) for k, x in v.items()},
+                      ensure_ascii=False)
+
+
 def api_messages(messages, budget_chars=None):
     """Copia lista para enviar a la API: sin campos privados (_...) y, si no entra en el presupuesto, con los
-    resultados de herramientas más viejos reemplazados por un aviso. No toca la lista original."""
+    resultados de herramientas más viejos reemplazados por un aviso; si con eso no alcanza, también los textos largos
+    de las llamadas más viejas (write_file lleva el archivo entero). No toca la lista original."""
     out = [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
     if not budget_chars:
         return out
-    size = sum(len(m.get("content") or "") + sum(len(c["function"]["arguments"]) for c in m.get("tool_calls") or []) for m in out)
+    size = messages_size(out)
     for m in out:
         if size <= budget_chars:
-            break
+            return out
         if m["role"] == "tool" and m.get("content") != OMITTED and len(m.get("content") or "") > len(OMITTED):
             size -= len(m["content"]) - len(OMITTED)
             m["content"] = OMITTED
+    for m in out:
+        if size <= budget_chars:
+            break
+        if m.get("tool_calls"):
+            calls = []
+            for c in m["tool_calls"]:
+                new = _shrink_args(c["function"]["arguments"])
+                size -= len(c["function"]["arguments"]) - len(new)
+                calls.append({**c, "function": {**c["function"], "arguments": new}})
+            m["tool_calls"] = calls           # lista nueva: la original sigue intacta
     return out
 
 
@@ -57,7 +104,8 @@ def validate(messages):
 def repair(messages):
     """Deja el historial bien formado tras una interrupción (excepción a mitad de un paso, sesión guardada cortada):
     cada llamada sin resultado recibe uno de error, y los resultados huérfanos se descartan. Modifica la lista en su
-    lugar y devuelve cuántos arreglos hizo."""
+    lugar y devuelve cuántos arreglos hizo. También cambia por {} los argumentos que no son JSON (una llamada cortada
+    por el límite de tokens), que dejarían la sesión rechazada por llama-server en cada pedido."""
     out, fixes, i = [], 0, 0
     while i < len(messages):
         m = messages[i]
@@ -67,6 +115,10 @@ def repair(messages):
             continue
         out.append(m)
         if m.get("role") == "assistant" and m.get("tool_calls"):
+            for c in m["tool_calls"]:
+                if not args_ok(c["function"].get("arguments")):
+                    c["function"]["arguments"] = BROKEN_ARGS
+                    fixes += 1
             got, consumed = {}, 0
             while i < len(messages) and messages[i].get("role") == "tool":
                 got.setdefault(messages[i].get("tool_call_id"), messages[i])
@@ -85,12 +137,31 @@ def repair(messages):
 
 
 class Agent:
-    def __init__(self, make_stream, toolbox=None, max_steps=DEFAULT_MAX_STEPS, budget_chars=600000):
+    def __init__(self, make_stream, toolbox=None, max_steps=DEFAULT_MAX_STEPS, budget_chars=600000,
+                 ctx_tokens=None, reserve_tokens=0, overhead_chars=0, chars_per_token=DEFAULT_CHARS_PER_TOKEN):
+        """Con ctx_tokens (modelo local) el presupuesto del historial es la ventana menos lo reservado para la
+        respuesta (reserve_tokens) y lo que ocupan el prompt de sistema y las herramientas (overhead_chars); si no,
+        budget_chars fijo. chars_per_token se recalibra en cada paso y queda en el atributo para la próxima corrida."""
         self.make_stream = make_stream      # (mensajes_api, herramientas|None) -> iterable de eventos con .cancel()
         self.toolbox = toolbox
         self.max_steps = max_steps
         self.budget_chars = budget_chars
+        self.ctx_tokens = ctx_tokens
+        self.reserve_tokens = reserve_tokens
+        self.overhead_chars = overhead_chars
+        self.chars_per_token = chars_per_token
         self._stream = None
+
+    def budget(self):
+        if not self.ctx_tokens:
+            return self.budget_chars
+        room = (self.ctx_tokens - self.reserve_tokens) * self.chars_per_token * CTX_MARGIN - self.overhead_chars
+        return max(MIN_BUDGET_CHARS, int(room))
+
+    def _calibrate(self, usage, sent_chars):
+        pt = (usage or {}).get("prompt_tokens")
+        if self.ctx_tokens and isinstance(pt, int) and pt > 0:
+            self.chars_per_token = min(8.0, max(1.0, (sent_chars + self.overhead_chars) / pt))
 
     def cancel_stream(self):
         s = self._stream
@@ -106,7 +177,8 @@ class Agent:
                 return "cancelled"
             emit("step_begin", step)
             tools = self.toolbox.specs if self.toolbox else None
-            stream = self.make_stream(api_messages(messages, self.budget_chars), tools)
+            sent = api_messages(messages, self.budget())
+            stream = self.make_stream(sent, tools)
             self._stream = stream
             content, reasoning, calls, finish = "", "", None, None
             try:
@@ -119,6 +191,8 @@ class Agent:
                         calls = val
                     elif kind == "finish":
                         finish = val
+                    elif kind == "usage":
+                        self._calibrate(val, messages_size(sent))
                     emit(kind, val)
             finally:
                 self._stream = None
@@ -136,6 +210,9 @@ class Agent:
                 msg["tool_calls"] = calls
             messages.append(msg)
             emit("step_end", {"content": content, "reasoning": reasoning, "finish": finish, "calls": calls or []})
+            if finish == "length":
+                emit("notice", "La respuesta del modelo se cortó por el límite de tokens (contexto lleno o tope de salida). "
+                               "Si pasa seguido con un modelo local, subí el contexto en Opciones.")
             if not calls:
                 return "done"
 
@@ -153,6 +230,12 @@ class Agent:
                         args = at.parse_args(raw)
                     except at.ToolError as e:
                         args, result = None, f"ERROR: {e}"
+                        if finish == "length":
+                            result += (". Your reply was cut off by the token limit before the arguments of this call were "
+                                       "complete, so it did not run. Resend it shorter: split a big file into several edits, "
+                                       "keep commit messages to one short line.")
+                        if not args_ok(raw):
+                            c["function"]["arguments"] = BROKEN_ARGS    # en pantalla se sigue viendo `raw`, el texto original
                     emit("tool_start", c["id"], name, args if args is not None else raw)
                     if args is not None:
                         key = (name, json.dumps(args, sort_keys=True))

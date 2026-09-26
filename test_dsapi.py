@@ -39,6 +39,38 @@ check("config dañada: avisa", "dañada" in c3.load_warning)
 check("config dañada: conserva copia", os.path.exists(os.path.join(d, "config.json.dañado")))
 check("config dañada: usa defaults", c3["model"] == "deepseek-v4-pro")
 
+# --- un 500 dice de qué servidor vino: el del modelo local no es "de DeepSeek" (servidor HTTP real en 127.0.0.1)
+import http.server  # noqa: E402
+import urllib.request  # noqa: E402
+
+
+class _H500(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"error": {"code": 500, "message": "Failed to parse tool call arguments as JSON"}}).encode()
+        self.send_response(500)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+srv500 = http.server.HTTPServer(("127.0.0.1", 0), _H500)
+threading.Thread(target=srv500.serve_forever, daemon=True).start()
+url500 = f"http://127.0.0.1:{srv500.server_port}/"
+msgs500 = {}
+for who in ("el modelo local", "DeepSeek"):
+    try:
+        dsapi._open(urllib.request.Request(url500), 10, who)
+    except dsapi.ApiError as e:
+        msgs500[who] = str(e)
+srv500.shutdown()
+check("500 de llama-server: dice modelo local y trae el detalle",
+      msgs500.get("el modelo local", "").startswith("Falla del servidor del modelo local: Failed to parse"), msgs500)
+check("CONTROL: 500 de DeepSeek sigue diciendo DeepSeek", msgs500.get("DeepSeek", "").startswith("Falla del servidor de DeepSeek:"), msgs500)
+
 # --- adjuntos
 a = os.path.join(tmp, "a.py")
 open(a, "w", encoding="utf-8").write("x = 1\n")

@@ -1,5 +1,6 @@
 """Prueba del bucle del agente con streams falsos (sin red ni modelo): protocolo, cancelación, bucles, compactación."""
 import copy
+import json
 import os
 import tempfile
 import threading
@@ -252,6 +253,88 @@ check("CONTROL: una edición que falló NO reinicia: la 3.ª lectura igual se fr
       res[2].startswith("ERROR") and "already made" in res[3], res)
 st, m, ev, f = run([rd(1), rd(2), rd(3), fin])
 check("CONTROL: sin cambios de por medio, repetir sigue frenándose", "already made" in [x["content"] for x in m if x["role"] == "tool"][2])
+
+# ---- 13. respuesta cortada por el límite de tokens (caso real: sesión cronometro, 2026-09-25)
+# llama-server llenó la ventana en medio de un `git commit -m ...`; el JSON roto quedaba en el historial y cada pedido
+# siguiente volvía con 500 "Failed to parse tool call arguments as JSON": la sesión quedaba inservible.
+roto = '{"command":"git commit --amend -m \\"Version 0.21\\" -m \\"- Cálculo mejorado de ángulos\\" -m'
+st, m, ev, f = run([
+    [("tool_calls", [call("k1", "run_command", roto), call("k2", "read_file", {"path": "a.txt"})]), ("finish", "length")],
+    [("content", "listo"), ("finish", "stop")]])
+res = [x["content"] for x in m if x["role"] == "tool"]
+check("cortada: el modelo recibe el error JSON y la explicación del corte", "not valid JSON" in res[0] and "cut off by the token limit" in res[0], res[0])
+check("cortada: en el historial quedan {} en vez del JSON roto", m[1]["tool_calls"][0]["function"]["arguments"] == agent.BROKEN_ARGS)
+check("CONTROL: la otra llamada del mismo paso conserva sus argumentos y corre",
+      json.loads(m[1]["tool_calls"][1]["function"]["arguments"]) == {"path": "a.txt"} and "uno dos tres" in res[1], m[1])
+check("cortada: el pedido siguiente no lleva ningún argumento inválido",
+      all(agent.args_ok(c["function"]["arguments"]) for x in f.seen[1][0] for c in x.get("tool_calls") or []))
+check("cortada: se avisa en pantalla que fue por el límite de tokens", any(e[0] == "notice" and "límite de tokens" in e[1] for e in ev))
+check("cortada: en pantalla se sigue viendo el texto original", any(e[0] == "tool_start" and e[3] == roto for e in ev))
+st, m, ev, f = run([[("content", "a medi"), ("finish", "length")]])
+check("respuesta de texto cortada: también avisa", st == "done" and any(e[0] == "notice" and "límite de tokens" in e[1] for e in ev))
+st, m, ev, f = run([[("tool_calls", [call("k3", "read_file", '{"path": "a.t')]), ("finish", "tool_calls")], fin])
+check("CONTROL: JSON roto sin corte por límite: sin la explicación del corte, pero igual se sanea",
+      "cut off" not in m[2]["content"] and m[1]["tool_calls"][0]["function"]["arguments"] == agent.BROKEN_ARGS, m[1:3])
+
+# ---- 14. repair sanea una sesión ya guardada con el JSON roto (la del caso real, al volver a abrirla)
+h = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "", "tool_calls": [
+         {"id": "c1", "type": "function", "function": {"name": "run_command", "arguments": roto}}]},
+     {"role": "tool", "tool_call_id": "c1", "content": "ERROR: arguments are not valid JSON"}]
+n = agent.repair(h)
+check("repair: argumentos rotos -> {} y cuenta el arreglo", n == 1 and h[1]["tool_calls"][0]["function"]["arguments"] == "{}" and agent.validate(h) == [], (n, h))
+check("repair: segunda pasada no cambia nada", agent.repair(h) == 0)
+h = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "", "tool_calls": [
+         {"id": "c1", "type": "function", "function": {"name": "list_dir", "arguments": ""}}]}, _res(1)]
+check("CONTROL: repair deja intactos los argumentos vacíos (válidos: equivalen a {})", agent.repair(h) == 0 and h[1]["tool_calls"][0]["function"]["arguments"] == "")
+
+# ---- 15. compactar también los textos largos de las llamadas viejas (write_file lleva el archivo entero)
+hist = [{"role": "user", "content": "hola"}]
+for i in range(4):
+    hist += [{"role": "assistant", "content": "", "tool_calls": [call(f"w{i}", "write_file", {"path": f"f{i}.py", "content": "y" * 6000})]},
+             {"role": "tool", "tool_call_id": f"w{i}", "content": "OK"}]
+orig_copy = copy.deepcopy(hist)
+comp = agent.api_messages(hist, budget_chars=10000)
+a0 = json.loads(comp[1]["tool_calls"][0]["function"]["arguments"])
+check("compactar llamadas: la más vieja pierde el texto largo pero conserva la ruta", a0 == {"path": "f0.py", "content": agent.OMITTED}, a0)
+check("compactar llamadas: la más reciente queda entera", json.loads(comp[-2]["tool_calls"][0]["function"]["arguments"])["content"] == "y" * 6000)
+check("compactar llamadas: entra en el presupuesto", agent.messages_size(comp) <= 10000, agent.messages_size(comp))
+check("compactar llamadas: todos los argumentos siguen siendo JSON válido",
+      all(agent.args_ok(c["function"]["arguments"]) for x in comp for c in x.get("tool_calls") or []))
+check("compactar llamadas: no toca la lista original", hist == orig_copy)
+check("CONTROL: si alcanza con los resultados, las llamadas no se tocan", agent.api_messages(hist, budget_chars=10 ** 6) == hist)
+
+# ---- 16. presupuesto de un modelo local: sale de la ventana real y se recalibra con prompt_tokens
+a = agent.Agent(None, ctx_tokens=20480, reserve_tokens=6826, overhead_chars=9000, chars_per_token=2.5)
+check("presupuesto local: (ctx - reserva) * c/t * margen - sobrecarga",
+      a.budget() == int((20480 - 6826) * 2.5 * agent.CTX_MARGIN - 9000), a.budget())
+check("CONTROL: sin ctx_tokens (DeepSeek) el presupuesto es el fijo", agent.Agent(None, budget_chars=600000).budget() == 600000)
+check("presupuesto local: nunca menos que el piso", agent.Agent(None, ctx_tokens=4000, reserve_tokens=3900, overhead_chars=9000).budget() == agent.MIN_BUDGET_CHARS)
+
+
+class Calib:
+    """Stream falso que informa prompt_tokens como un servidor más denso que lo supuesto: (enviado + 2000) / 1,5."""
+
+    def __init__(self):
+        self.sent, self.cancelled = [], False
+
+    def factory(self, msgs, tools):
+        self.sent.append(agent.messages_size(msgs))
+        n = len(self.sent)
+        evs = [("usage", {"prompt_tokens": int((self.sent[-1] + 2000) / 1.5)})]
+        evs += [("tool_calls", [call(f"n{n}", "list_dir", {})]), ("finish", "tool_calls")] if n < 3 else fin
+        return _S(evs, self)
+
+
+hist = [{"role": "user", "content": "hola"}]
+for i in range(12):
+    hist += [{"role": "assistant", "content": "", "tool_calls": [call(f"r{i}", "read_file", {"path": "a"})]},
+             {"role": "tool", "tool_call_id": f"r{i}", "content": "z" * 3000}]
+cb = Calib()
+a = agent.Agent(cb.factory, tb, ctx_tokens=12000, reserve_tokens=4000, overhead_chars=2000, chars_per_token=2.5)
+st = a.run(hist, lambda *x: None, threading.Event())
+check("recalibra: c/t medido con los prompt_tokens del servidor", st == "done" and abs(a.chars_per_token - 1.5) < 0.01, (st, a.chars_per_token))
+check("recalibra: el paso siguiente manda menos que el primero", cb.sent[1] < cb.sent[0], cb.sent)
+check("recalibra: lo mandado tras calibrar entra en la ventana menos la reserva", (cb.sent[1] + 2000) / 1.5 <= 12000 - 4000, cb.sent)
 
 print("\nFALLAS:", fallas if fallas else "ninguna")
 raise SystemExit(1 if fallas else 0)

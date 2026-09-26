@@ -46,20 +46,21 @@ class AttachError(ValueError):
 
 # ---------------------------------------------------------------- errores HTTP
 
-def _friendly(status, detail):
+def _friendly(status, detail, who="DeepSeek"):
+    srv = "de DeepSeek" if who == "DeepSeek" else "del modelo local"      # un 500 de llama-server no es de DeepSeek
     base = {
         400: "Pedido inválido",
         401: "API key inválida o vencida",
         402: "Saldo insuficiente",
         422: "Parámetro inválido",
         429: "Demasiados pedidos seguidos",
-        500: "Falla del servidor de DeepSeek",
-        503: "Servidor de DeepSeek sobrecargado",
+        500: f"Falla del servidor {srv}",
+        503: f"Servidor {srv} sobrecargado",
     }.get(status, f"Error HTTP {status}")
     return f"{base}: {detail}" if detail else base
 
 
-def _from_http_error(e):
+def _from_http_error(e, who="DeepSeek"):
     detail = ""
     try:
         raw = e.read().decode("utf-8", "replace")
@@ -71,14 +72,14 @@ def _from_http_error(e):
             detail = raw
     except Exception:
         pass
-    return ApiError(_friendly(e.code, str(detail).strip()[:400]), status=e.code)
+    return ApiError(_friendly(e.code, str(detail).strip()[:400], who), status=e.code)
 
 
 def _open(req, timeout, who="DeepSeek"):
     try:
         return urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
-        raise _from_http_error(e)
+        raise _from_http_error(e, who)
     except urllib.error.URLError as e:
         if isinstance(e.reason, TimeoutError):
             raise ApiError(f"{who} no respondió a tiempo", timeout=True)

@@ -5,6 +5,7 @@ Regla de hilos: tkinter solo se toca desde el hilo principal. El hilo de trabajo
 cola (self.post) y _drain_ui lo ejecuta.
 """
 import ctypes
+import json
 import os
 import queue
 import re
@@ -86,6 +87,7 @@ class App:
         self.cancel_ev = threading.Event()
         self.agent = None
         self.max_steps = ag.DEFAULT_MAX_STEPS      # pasos por turno; atributo para poder probarlo con un tope chico
+        self._cpt = {}      # caracteres por token medidos por modelo local: el turno siguiente arranca calibrado
         self.worker = None
         self._dialog = None
         self._server = None
@@ -619,7 +621,7 @@ class App:
         if s.workspace and not os.path.isdir(s.workspace):
             self.chat.note(f"La carpeta de esta sesión ya no existe: {s.workspace}. Abrí otra con «Abrir carpeta…».", error=True)
         if fixed:
-            self.chat.note("La sesión había quedado cortada a la mitad de una acción; se completó con un aviso de interrupción.")
+            self.chat.note("La sesión había quedado con una acción cortada a la mitad o incompleta; se reparó para poder seguir.")
         self._key_note()
         self._update_status()
         self._retitle()
@@ -1117,13 +1119,25 @@ class App:
         if self._stream_factory is not None:
             return self._stream_factory(entry, msgs, tools)
         if entry["kind"] == "local":
-            mt = max(512, min(int(self.cfg["max_tokens"]), int(self.cfg["local_ctx"]) // 2))
-            return dsapi.ChatStream(None, entry["name"], msgs, None, mt, base=base, tools=tools, timeout=LOCAL_TIMEOUT)
+            return dsapi.ChatStream(None, entry["name"], msgs, None, self._local_max_tokens(), base=base, tools=tools, timeout=LOCAL_TIMEOUT)
         effort = s.effort if s.effort in (entry["efforts"] or []) else None   # el de un modelo local no viaja a DeepSeek
         return dsapi.ChatStream(self.cfg.api_key, entry["id"], msgs, effort, self.cfg["max_tokens"], tools=tools)
 
+    def _local_max_tokens(self):
+        """Tope de respuesta de un modelo local. Es también lo que se le reserva dentro de la ventana: el historial
+        se recorta para que prompt + respuesta entren en local_ctx (si no, llama-server corta la respuesta a la mitad)."""
+        return max(512, min(int(self.cfg["max_tokens"]), int(self.cfg["local_ctx"]) // 3))
+
+    def _agent_budget(self, entry, toolbox):
+        if entry["kind"] != "local":
+            return {"budget_chars": REMOTE_BUDGET}
+        system = prompts.system_prompt(toolbox.root if toolbox else "", self.cfg["system_prompt"])
+        overhead = len(system) + (len(json.dumps(toolbox.specs, ensure_ascii=False)) if toolbox else 0)
+        return {"ctx_tokens": int(self.cfg["local_ctx"]), "reserve_tokens": self._local_max_tokens(), "overhead_chars": overhead,
+                "chars_per_token": self._cpt.get(entry.get("path") or entry["name"], ag.DEFAULT_CHARS_PER_TOKEN)}
+
     def _work(self, s, entry, toolbox, n0, text, files, cancel):
-        outcome, error = None, None
+        outcome, error, agent = None, None, None
 
         def emit(kind, *a):
             if kind == "usage":
@@ -1147,8 +1161,8 @@ class App:
                     raise localmodels.LocalError(f"No se encuentra el modelo {entry['path']} (¿está conectado el pendrive?).")
                 base = self._local_server().ensure(entry["path"], int(self.cfg["local_ctx"]), cancel,
                                                    reasoning=localmodels.reasoning_for(entry["path"], s.effort))
-            budget = int(self.cfg["local_ctx"]) * 3 if entry["kind"] == "local" else REMOTE_BUDGET
-            agent = ag.Agent(lambda msgs, tools: self._make_stream(entry, s, base, msgs, tools, toolbox), toolbox, max_steps=self.max_steps, budget_chars=budget)
+            agent = ag.Agent(lambda msgs, tools: self._make_stream(entry, s, base, msgs, tools, toolbox), toolbox,
+                             max_steps=self.max_steps, **self._agent_budget(entry, toolbox))
             self.agent = agent
             outcome = agent.run(s.messages, emit, cancel)
         except Exception as e:                      # noqa: BLE001 — cualquier falla se muestra, ninguna se traga
@@ -1160,6 +1174,8 @@ class App:
                 error = f"Error inesperado: {e!r}"
         finally:
             self.agent = None
+            if agent is not None and agent.ctx_tokens:
+                self._cpt[entry.get("path") or entry["name"]] = agent.chars_per_token
             ag.repair(s.messages)
             restore = None
             if (error or outcome == "cancelled") and len(s.messages) == n0 + 1 and s.messages[-1].get("role") == "user":
