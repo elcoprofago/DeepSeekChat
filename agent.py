@@ -11,6 +11,16 @@ import json
 import agent_tools as at
 
 OMITTED = "[resultado anterior omitido para ahorrar contexto]"
+# Lo que queda en una llamada vieja en lugar de un texto largo (el archivo entero de un write_file). Solo textos de más
+# de LONG_ARG_CHARS: un comando nunca se toca. Caso real (sesión cronometro, 2026-09-26): al compactar comandos de 300
+# caracteres, el modelo local vio en su propio historial {"command": "<aviso>"} y lo imitó siete veces seguidas.
+ARGS_OMITTED = "[texto omitido de una llamada vieja para ahorrar contexto; no es el texto real]"
+LONG_ARG_CHARS = 1000
+# Los últimos pasos con llamadas llegan enteros al modelo mientras haya otra forma de hacer lugar.
+KEEP_RECENT_STEPS = 6
+PLACEHOLDER_ERROR = ("ERROR: this call was not run: an argument is only the placeholder that DeepSeekChat puts in OLD "
+                     "history to save context. It is not a real command or text. Write the actual command or text; if you "
+                     "need the exact content of a file, read it again with read_file.")
 # Lo que queda en el historial en lugar de argumentos que no son JSON (una respuesta cortada por el límite de tokens).
 # Si quedara el texto roto, llama-server vuelve a leer el historial en cada pedido, no puede, y contesta 500 para
 # siempre: la sesión queda inservible.
@@ -51,34 +61,73 @@ def _shrink_args(raw):
         return BROKEN_ARGS
     if not isinstance(v, dict):
         return raw
-    return json.dumps({k: (OMITTED if isinstance(x, str) and len(x) > 2 * len(OMITTED) else x) for k, x in v.items()},
+    return json.dumps({k: (ARGS_OMITTED if isinstance(x, str) and len(x) > LONG_ARG_CHARS else x) for k, x in v.items()},
                       ensure_ascii=False)
 
 
+def is_placeholder_call(args):
+    """True si algún argumento es exactamente uno de los avisos de compactación: el modelo copió su historial en vez
+    de escribir el texto real. Igualdad exacta, no «contiene»: escribir un archivo que menciona el aviso es legítimo."""
+    return any(isinstance(v, str) and v.strip() in (OMITTED, ARGS_OMITTED) for v in (args or {}).values())
+
+
 def api_messages(messages, budget_chars=None):
-    """Copia lista para enviar a la API: sin campos privados (_...) y, si no entra en el presupuesto, con los
-    resultados de herramientas más viejos reemplazados por un aviso; si con eso no alcanza, también los textos largos
-    de las llamadas más viejas (write_file lleva el archivo entero). No toca la lista original."""
+    """Copia lista para enviar a la API: sin campos privados (_...) y recortada al presupuesto. No toca la lista
+    original. Primero se recorta lo viejo, de lo más viejo a lo más nuevo; los últimos KEEP_RECENT_STEPS pasos, solo
+    si con eso no alcanza:
+      1. resultados de herramientas viejos -> aviso
+      2. textos largos (> LONG_ARG_CHARS) de llamadas viejas -> aviso (los comandos quedan enteros)
+      3. pasos viejos enteros (llamada + sus resultados) se descartan; los mensajes del usuario nunca
+      4. y 5. lo mismo que 1 y 2 sobre los pasos recientes."""
     out = [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
     if not budget_chars:
         return out
     size = messages_size(out)
-    for m in out:
-        if size <= budget_chars:
-            return out
-        if m["role"] == "tool" and m.get("content") != OMITTED and len(m.get("content") or "") > len(OMITTED):
-            size -= len(m["content"]) - len(OMITTED)
-            m["content"] = OMITTED
-    for m in out:
-        if size <= budget_chars:
-            break
-        if m.get("tool_calls"):
-            calls = []
-            for c in m["tool_calls"]:
-                new = _shrink_args(c["function"]["arguments"])
-                size -= len(c["function"]["arguments"]) - len(new)
-                calls.append({**c, "function": {**c["function"], "arguments": new}})
-            m["tool_calls"] = calls           # lista nueva: la original sigue intacta
+    if size <= budget_chars:
+        return out
+    steps = [i for i, m in enumerate(out) if m.get("tool_calls")]
+    cut = steps[-KEEP_RECENT_STEPS] if len(steps) >= KEEP_RECENT_STEPS else 0     # desde acá, lo reciente
+
+    def results(lo, hi):
+        nonlocal size
+        for m in out[lo:hi]:
+            if size <= budget_chars:
+                return
+            if m["role"] == "tool" and m.get("content") != OMITTED and len(m.get("content") or "") > len(OMITTED):
+                size -= len(m["content"]) - len(OMITTED)
+                m["content"] = OMITTED
+
+    def args(lo, hi):
+        nonlocal size
+        for m in out[lo:hi]:
+            if size <= budget_chars:
+                return
+            if m.get("tool_calls"):
+                calls = []
+                for c in m["tool_calls"]:
+                    new = _shrink_args(c["function"]["arguments"])
+                    size -= len(c["function"]["arguments"]) - len(new)
+                    calls.append({**c, "function": {**c["function"], "arguments": new}})
+                m["tool_calls"] = calls           # lista nueva: la original sigue intacta
+
+    results(0, cut)
+    args(0, cut)
+    if size > budget_chars and cut:
+        kept, i = [], 0
+        while i < cut:
+            m = out[i]
+            i += 1
+            if size > budget_chars and m.get("tool_calls"):
+                size -= messages_size([m])
+                while i < len(out) and out[i]["role"] == "tool":      # sus resultados se van con ella
+                    size -= messages_size([out[i]])
+                    i += 1
+                continue
+            kept.append(m)
+        out = kept + out[i:]
+        cut = len(kept)
+    results(cut, len(out))
+    args(cut, len(out))
     return out
 
 
@@ -246,6 +295,8 @@ class Agent:
                         elif seen[key] >= REPEAT_WARN:
                             result = ("ERROR: you already made this exact call %d times. Stop repeating it: answer the user "
                                       "with what you know, or try a different approach." % (seen[key] - 1))
+                        elif is_placeholder_call(args):
+                            result = PLACEHOLDER_ERROR
                         else:
                             result = self.toolbox.execute(name, args, cancel)
                             if name in STATE_CHANGING and not result.startswith(("ERROR", "BLOCKED", "DENIED")):

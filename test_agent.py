@@ -295,7 +295,7 @@ for i in range(4):
 orig_copy = copy.deepcopy(hist)
 comp = agent.api_messages(hist, budget_chars=10000)
 a0 = json.loads(comp[1]["tool_calls"][0]["function"]["arguments"])
-check("compactar llamadas: la más vieja pierde el texto largo pero conserva la ruta", a0 == {"path": "f0.py", "content": agent.OMITTED}, a0)
+check("compactar llamadas: la más vieja pierde el texto largo pero conserva la ruta", a0 == {"path": "f0.py", "content": agent.ARGS_OMITTED}, a0)
 check("compactar llamadas: la más reciente queda entera", json.loads(comp[-2]["tool_calls"][0]["function"]["arguments"])["content"] == "y" * 6000)
 check("compactar llamadas: entra en el presupuesto", agent.messages_size(comp) <= 10000, agent.messages_size(comp))
 check("compactar llamadas: todos los argumentos siguen siendo JSON válido",
@@ -335,6 +335,62 @@ st = a.run(hist, lambda *x: None, threading.Event())
 check("recalibra: c/t medido con los prompt_tokens del servidor", st == "done" and abs(a.chars_per_token - 1.5) < 0.01, (st, a.chars_per_token))
 check("recalibra: el paso siguiente manda menos que el primero", cb.sent[1] < cb.sent[0], cb.sent)
 check("recalibra: lo mandado tras calibrar entra en la ventana menos la reserva", (cb.sent[1] + 2000) / 1.5 <= 12000 - 4000, cb.sent)
+
+# ---- 17. regresión: el modelo imitaba el aviso de compactación (caso real: sesión cronometro, 2026-09-26)
+# Con 20480 de ventana, los comandos recientes llegaban al modelo como {"command": "<aviso>"}; el modelo copió el aviso
+# en siete llamadas reales (cmd ejecutó el aviso; un edit_file lo usó como old y new) y dio por hecho lo que no corrió.
+cmd = "cd /d C:\\proyecto && pyinstaller --onefile --noconsole --icon=app.ico --name Cronometro_v021 " + "--add-data x;x " * 15
+hist = [{"role": "user", "content": "compilá"}]
+for i in range(20):
+    hist += [{"role": "assistant", "content": "", "tool_calls": [call(f"c{i}", "run_command", {"command": cmd + str(i)})]},
+             {"role": "tool", "tool_call_id": f"c{i}", "content": "salida " * 500}]
+for bud in (26900, 12000, 4000):
+    comp = agent.api_messages(hist, budget_chars=bud)
+    cmds = [json.loads(c["function"]["arguments"])["command"] for x in comp for c in x.get("tool_calls") or []]
+    check(f"regresión ({bud}): ningún comando se reemplaza por un aviso", all(c.startswith("cd /d") for c in cmds), cmds[-1][:60])
+    check(f"regresión ({bud}): el protocolo sigue bien formado", agent.validate(comp) == [])
+    check(f"regresión ({bud}): se conservan los 6 pasos recientes y el pedido del usuario",
+          cmds[-6:] == [cmd + str(i) for i in range(14, 20)] and comp[0] == hist[0], len(cmds))
+check("regresión: con presupuesto holgado para los comandos, entra", agent.messages_size(agent.api_messages(hist, 26900)) <= 26900)
+
+hist = [{"role": "user", "content": "hola"}]
+for i in range(10):
+    hist += [{"role": "assistant", "content": "", "tool_calls": [call(f"w{i}", "write_file", {"path": f"f{i}.py", "content": "y" * 3000})]},
+             {"role": "tool", "tool_call_id": f"w{i}", "content": "OK"},
+             {"role": "user", "content": f"seguí {i}"}] if i == 1 else \
+            [{"role": "assistant", "content": "", "tool_calls": [call(f"w{i}", "write_file", {"path": f"f{i}.py", "content": "y" * 3000})]},
+             {"role": "tool", "tool_call_id": f"w{i}", "content": "OK"}]
+comp = agent.api_messages(hist, budget_chars=19000)
+conts = [json.loads(c["function"]["arguments"])["content"] for x in comp for c in x.get("tool_calls") or []]
+check("pasos viejos: primero se compactan sus textos, los recientes llegan enteros",
+      conts == [agent.ARGS_OMITTED] * 4 + ["y" * 3000] * 6 and agent.messages_size(comp) <= 19000, (len(conts), agent.messages_size(comp)))
+comp = agent.api_messages(hist, budget_chars=18500)
+args_ = [json.loads(c["function"]["arguments"]) for x in comp for c in x.get("tool_calls") or []]
+paths = [a_["path"] for a_ in args_]
+check("descarte: si no alcanza, los pasos viejos se van enteros (del más viejo) antes de tocar los recientes",
+      len(paths) < 10 and paths[-6:] == [f"f{i}.py" for i in range(4, 10)] and paths == [f"f{i}.py" for i in range(10 - len(paths), 10)], paths)
+check("descarte: los recientes llegan enteros", all(a_["content"] == "y" * 3000 for a_ in args_[-6:]))
+check("descarte: entra en el presupuesto", agent.messages_size(comp) <= 19000, agent.messages_size(comp))
+check("descarte: el protocolo sigue bien formado", agent.validate(comp) == [])
+check("descarte: los mensajes del usuario nunca se descartan",
+      [x["content"] for x in comp if x["role"] == "user"] == ["hola", "seguí 1"], [x for x in comp if x["role"] == "user"])
+comp = agent.api_messages(hist, budget_chars=10000)
+last = [json.loads(c["function"]["arguments"])["content"] for x in comp for c in x.get("tool_calls") or []]
+check("presupuesto mínimo: recién ahí se compactan los recientes, empezando por el más viejo",
+      last[0] == agent.ARGS_OMITTED and last[-1] == "y" * 3000 and agent.messages_size(comp) <= 10000, (last, agent.messages_size(comp)))
+
+for nombre, args in [("run_command", {"command": agent.OMITTED}), ("run_command", {"command": " " + agent.ARGS_OMITTED}),
+                     ("edit_file", {"path": "a.txt", "old": agent.ARGS_OMITTED, "new": agent.ARGS_OMITTED}),
+                     ("write_file", {"path": "nuevo.txt", "content": agent.ARGS_OMITTED})]:
+    st, m, ev, f = run([[("tool_calls", [call("p1", nombre, args)]), ("finish", "tool_calls")], fin])
+    check(f"aviso copiado en {nombre}: no se ejecuta y se explica", m[2]["content"] == agent.PLACEHOLDER_ERROR, m[2]["content"][:80])
+check("aviso copiado: a.txt intacto y nuevo.txt no se creó",
+      open(os.path.join(ws, "a.txt")).read() == "uno dos tres\n" and not os.path.exists(os.path.join(ws, "nuevo.txt")))
+doc = "Si ves " + agent.ARGS_OMITTED + " en el historial, releé el archivo.\n"
+st, m, ev, f = run([[("tool_calls", [call("p2", "write_file", {"path": "doc.txt", "content": doc})]), ("finish", "tool_calls")], fin])
+check("CONTROL: un texto que solo menciona el aviso se escribe normalmente",
+      m[2]["content"].startswith("OK") and open(os.path.join(ws, "doc.txt"), encoding="utf-8").read() == doc, m[2]["content"][:80])
+check("CONTROL final: CONTROL.txt intacto", open(os.path.join(ws, "CONTROL.txt")).read() == "intacto\n")
 
 print("\nFALLAS:", fallas if fallas else "ninguna")
 raise SystemExit(1 if fallas else 0)
