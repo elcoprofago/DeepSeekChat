@@ -390,6 +390,14 @@ doc = "Si ves " + agent.ARGS_OMITTED + " en el historial, releé el archivo.\n"
 st, m, ev, f = run([[("tool_calls", [call("p2", "write_file", {"path": "doc.txt", "content": doc})]), ("finish", "tool_calls")], fin])
 check("CONTROL: un texto que solo menciona el aviso se escribe normalmente",
       m[2]["content"].startswith("OK") and open(os.path.join(ws, "doc.txt"), encoding="utf-8").read() == doc, m[2]["content"][:80])
+# ---- quién contestó: queda en cada respuesta y no se manda al modelo
+# Una sesión que pasó de DeepSeek a un modelo local mostraba (y exportaba) todo como escrito por el local.
+st, m, ev, f = run([[("tool_calls", [call("q1", "list_dir", {"path": "."})]), ("finish", "tool_calls")], fin], label="Qwen-X")
+resp = [x for x in m if x["role"] == "assistant"]
+check("cada respuesta del agente lleva _model con quien la escribió", len(resp) == 2 and all(x.get("_model") == "Qwen-X" for x in resp), resp)
+check("EFECTO: _model no viaja al modelo en el pedido siguiente", all("_model" not in x for x in f.seen[-1][0]), f.seen[-1][0])
+st, m, ev, f = run([fin])
+check("CONTROL: sin label no se inventa un _model", all("_model" not in x for x in m), m)
 check("CONTROL final: CONTROL.txt intacto", open(os.path.join(ws, "CONTROL.txt")).read() == "intacto\n")
 
 print("\nFALLAS:", fallas if fallas else "ninguna")

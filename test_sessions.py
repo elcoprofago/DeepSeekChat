@@ -85,6 +85,16 @@ json.dump({"id": "20260202-000000-mini", "messages": [{"role": "user", "content"
 m = st.load("20260202-000000-mini")
 check("sesión con menos campos: usa valores por defecto; campos desconocidos se ignoran", m.model == "" and m.approval == "ask" and m.totals["hit"] == 0 and not hasattr(m, "campo_futuro"))
 
+# exportar: cada respuesta con quien la escribió; el modelo del encabezado es el de ahora, no el de cada respuesta
+ex = ss.Session(model="local:X:\\Models\\Qwen-X.gguf")
+ex.messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "vieja"},
+               {"role": "user", "content": "b"}, {"role": "assistant", "content": "nube", "_model": "DeepSeek"},
+               {"role": "user", "content": "c"}, {"role": "assistant", "content": "local", "_model": "Qwen-X"}]
+md = ss.export_markdown(ex, "Asistente")
+check("exportar: cada respuesta con el nombre de quien la escribió",
+      md.index("## Asistente") < md.index("vieja") < md.index("## DeepSeek") < md.index("nube") < md.index("## Qwen-X") < md.index("\nlocal\n"), md)
+check("exportar: el encabezado aclara que es el modelo actual", "- Modelo actual: `local:" in md, md[:200])
+
 shutil.rmtree(d, ignore_errors=True)
 print("\nFALLAS:", fallas if fallas else "ninguna")
 raise SystemExit(1 if fallas else 0)

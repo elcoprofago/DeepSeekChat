@@ -107,6 +107,20 @@ try:
     except lm.LocalError as ex:
         e = str(ex)
     check("CONTROL: otra causa de muerte NO se atribuye a la memoria", e is not None and "memoria comprometida" not in e and "wrong shape" in e, e)
+    check("CONTROL: el error de un intento no arrastra líneas del intento anterior", "CPU_REPACK" not in e, e)
+    registro = open(srv_bat.log_path, encoding="utf-8").read()
+    check("el registro conserva cada intento y cómo terminó (antes se pisaba)",
+          registro.count("intento: chico.gguf") == 2 and registro.count("terminó solo (código 1)") == 2 and "CPU_REPACK" in registro, registro)
+    orig_max, lm.LOG_MAX_BYTES = lm.LOG_MAX_BYTES, 1000
+    open(srv_bat.log_path, "ab").write(b"x" * 2000)
+    try:
+        srv_bat.ensure(pequeno, timeout=30)
+    except lm.LocalError:
+        pass
+    lm.LOG_MAX_BYTES = orig_max
+    check("registro grande: pasa a .1 y el nuevo arranca de cero",
+          os.path.getsize(srv_bat.log_path + ".1") > 2000 and os.path.getsize(srv_bat.log_path) < 1000,
+          (os.path.getsize(srv_bat.log_path + ".1"), os.path.getsize(srv_bat.log_path)))
 finally:
     lm.memory_status = orig_status
 
@@ -169,6 +183,9 @@ else:
     except lm.LocalError as ex:
         e = ex
     check("cancelar durante la carga: LocalError y proceso apagado", e is not None and "Cancelado" in str(e) and not s.alive(), e)
+    registro = open(s.log_path, encoding="utf-8").read()
+    check("el registro dice qué intento quedó listo y cuál se canceló",
+          " listo a los " in registro and "cancelado por el usuario mientras cargaba" in registro and "detenido por la app" in registro, registro[-800:])
 
     # El hijo debe morir si el programa muere a la fuerza (Job Object). Se prueba con un padre desechable.
     padre = (f"import sys; sys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r}); import localmodels as lm; "

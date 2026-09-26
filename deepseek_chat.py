@@ -617,7 +617,7 @@ class App:
         self._update_folder_bar()
         self._refresh_model_widgets()
         self.appr_var.set(APPROVALS.get(s.approval, APPROVALS["ask"]))
-        self.chat.render_session(s.messages, self._label())
+        self.chat.render_session(s.messages)
         if s.workspace and not os.path.isdir(s.workspace):
             self.chat.note(f"La carpeta de esta sesión ya no existe: {s.workspace}. Abrí otra con «Abrir carpeta…».", error=True)
         if fixed:
@@ -642,7 +642,10 @@ class App:
             self.toolbox.extra_path = [os.path.join(self.cfg.root, "runtime")]
 
     def _label(self):
-        e = self._entry_for(self.sess.model) if self.sess and self.sess.model else None
+        return self._label_of(self._entry_for(self.sess.model) if self.sess and self.sess.model else None)
+
+    @staticmethod
+    def _label_of(e):
         return "DeepSeek" if e is None or e["kind"] == "remote" else e["name"]
 
     def _retitle(self):
@@ -782,7 +785,7 @@ class App:
     def write_export(self, s, path):
         try:
             with open(path, "w", encoding="utf-8", newline="\n") as f:
-                f.write(sessions.export_markdown(s, self._label()))
+                f.write(sessions.export_markdown(s, chatview.UNKNOWN_MODEL))
         except OSError as e:
             self.chat.note(f"No se pudo exportar: {e}", error=True)
             return None
@@ -1162,7 +1165,7 @@ class App:
                 base = self._local_server().ensure(entry["path"], int(self.cfg["local_ctx"]), cancel,
                                                    reasoning=localmodels.reasoning_for(entry["path"], s.effort))
             agent = ag.Agent(lambda msgs, tools: self._make_stream(entry, s, base, msgs, tools, toolbox), toolbox,
-                             max_steps=self.max_steps, **self._agent_budget(entry, toolbox))
+                             max_steps=self.max_steps, label=self._label_of(entry), **self._agent_budget(entry, toolbox))
             self.agent = agent
             outcome = agent.run(s.messages, emit, cancel)
         except Exception as e:                      # noqa: BLE001 — cualquier falla se muestra, ninguna se traga
@@ -1282,7 +1285,7 @@ class App:
         self._dismiss_dialog()
         if restore:
             # el mensaje del usuario ya no está en el historial: se redibuja sin él y su texto vuelve al campo de entrada
-            c.render_session(self.sess.messages, self._label())
+            c.render_session(self.sess.messages)
             text, files = restore
             if text and text != CONTINUE_TEXT and not self.input.get("1.0", "end-1c").strip():
                 self.input.insert("1.0", text)

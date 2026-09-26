@@ -149,7 +149,7 @@ def export_markdown(s, label="Asistente"):
     if s.workspace:
         out.append(f"- Carpeta: `{s.workspace}`")
     if s.model:
-        out.append(f"- Modelo: `{s.model}`")
+        out.append(f"- Modelo actual: `{s.model}`")
     out += [f"- Creada: {s.created}", f"- Última actividad: {s.updated}", ""]
     for m in s.messages:
         role = m.get("role")
@@ -159,7 +159,7 @@ def export_markdown(s, label="Asistente"):
             out += [f"- adjunto: {f}" for f in files]
             out.append("")
         elif role == "assistant":
-            out += [f"## {label}", ""]
+            out += [f"## {m.get('_model') or label}", ""]
             if m.get("content"):
                 out += [m["content"], ""]
             for c in m.get("tool_calls") or []:

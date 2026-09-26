@@ -396,6 +396,17 @@ app.on_effort_change()
 check("effort se guarda en la sesión", app.sess.effort == "high")
 disco = sessions.SessionStore(cfg.sessions_dir).load(app.sess.id)
 check("y en disco (la sesión tiene mensajes)", disco.effort == "high" and disco.model == "deepseek-flash", (disco.effort, disco.model))
+# quién contestó: antes, al cambiar de modelo, toda la sesión pasaba a figurar como escrita por el modelo nuevo
+del_local = [m for m in disco.messages if m.get("role") == "assistant" and m.get("content") == "respondo desde el local"]
+check("en disco, la respuesta del local dice que la escribió el local", len(del_local) == 1 and del_local[0].get("_model") == "Qwen-de-mentira", del_local)
+app._activate(disco)
+t_rec = app.chat.get_text()
+i_resp = t_rec.index("respondo desde el local")
+i_hdr = t_rec.rfind("Qwen-de-mentira", 0, i_resp)
+check("EFECTO: recargada ya con DeepSeek elegido, la respuesta del local sigue firmada por el local",
+      i_hdr >= 0 and t_rec.find("DeepSeek", i_hdr, i_resp) < 0, t_rec[-400:])
+check("CONTROL: el export tampoco atribuye la respuesta del local al modelo actual",
+      "## Qwen-de-mentira\n\nrespondo desde el local" in sessions.export_markdown(disco, "Asistente"))
 
 # local con interruptor de razonamiento: la barra lo ofrece, y lo elegido no viaja a DeepSeek
 with open(os.path.join(mdir, "gemma-4-E4B-de-mentira.gguf"), "wb") as f:

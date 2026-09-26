@@ -9,6 +9,7 @@ from tkinter import ttk
 FENCE = re.compile(r"```([^\n`]*)\n(.*?)(?:```|\Z)", re.S)
 INLINE = re.compile(r"(\*\*[^*\n]+\*\*|`[^`\n]+`)")
 ATTACH = re.compile(r"(?:^|\n\n)Archivo adjunto: ([^\n]*)\n")
+UNKNOWN_MODEL = "Asistente"      # respuesta guardada sin el nombre de quien la escribió (sesiones viejas)
 
 
 def miles(n):
@@ -64,6 +65,7 @@ class ChatView:
         self.t = None
         self._rid = 0
         self._last_role = None
+        self._last_label = None
         self.streaming = False
 
     # ------------------------------------------------------------ tema
@@ -111,6 +113,7 @@ class ChatView:
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
         self._last_role = None
+        self._last_label = None
         self.streaming = False
 
     def get_text(self):
@@ -189,9 +192,10 @@ class ChatView:
         self._last_role = "user"
 
     def assistant_header(self, label):
-        if self._last_role != "assistant":
+        if self._last_role != "assistant" or label != self._last_label:
             self.put(f"\n{label}\n", "hdr_bot")
         self._last_role = "assistant"
+        self._last_label = label
 
     def assistant_body(self, reasoning, content, note=None, final=False):
         """final=True: el paso no llamó a ninguna herramienta, así que su texto es la conclusión y va con su color."""
@@ -243,8 +247,10 @@ class ChatView:
 
     # ------------------------------------------------------------ recarga de una sesión
 
-    def render_session(self, messages, label):
-        """Dibuja un historial guardado con el mismo aspecto que tuvo en vivo."""
+    def render_session(self, messages, label=None):
+        """Dibuja un historial guardado con el mismo aspecto que tuvo en vivo. Cada respuesta lleva el nombre del modelo
+        que la escribió ("_model"); las guardadas antes de registrarlo usan label o UNKNOWN_MODEL, nunca el modelo
+        elegido ahora: una sesión que pasó de DeepSeek a un local mostraba todo como escrito por el local."""
         self.clear()
         for m in messages:
             role = m.get("role")
@@ -252,7 +258,7 @@ class ChatView:
                 text, files = split_user_content(str(m.get("content") or ""))
                 self.user(text, files)
             elif role == "assistant":
-                self.assistant_header(label)
+                self.assistant_header(m.get("_model") or label or UNKNOWN_MODEL)
                 self.assistant_body(m.get("_reasoning", ""), m.get("content") or "", final=not m.get("tool_calls"))
                 for c in m.get("tool_calls") or []:
                     name, raw = c["function"]["name"], c["function"]["arguments"]

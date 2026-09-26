@@ -174,6 +174,27 @@ win = cv.text.window_names()[0]
 cv.text.nametowidget(win).invoke()
 check("botón copiar entrega el código exacto", copiado == ["let a = 1"], copiado)
 
+# ---- quién contestó cada respuesta
+mixto = [
+    {"role": "user", "content": "uno"},
+    {"role": "assistant", "content": "respuesta vieja"},
+    {"role": "user", "content": "dos"},
+    {"role": "assistant", "content": "de la nube", "_model": "DeepSeek"},
+    {"role": "user", "content": "tres"},
+    {"role": "assistant", "content": "paso 1", "_model": "Qwen-X", "tool_calls": [{"id": "k", "type": "function", "function": {"name": "list_dir", "arguments": "{}"}}]},
+    {"role": "tool", "tool_call_id": "k", "content": "ok"},
+    {"role": "assistant", "content": "paso 2", "_model": "Qwen-X"},
+]
+cv.render_session(mixto)
+t = cv.get_text()
+check("cada respuesta lleva el nombre de quien la escribió", t.index("DeepSeek") < t.index("de la nube") and t.index("Qwen-X") < t.index("paso 1"), t)
+check("una respuesta vieja sin registro dice Asistente, no el modelo actual", t.index(chatview.UNKNOWN_MODEL) < t.index("respuesta vieja"), t)
+check("CONTROL: los pasos seguidos del mismo modelo llevan un solo encabezado", t.count("Qwen-X") == 1, t.count("Qwen-X"))
+cv.clear()
+cv.assistant_header("DeepSeek")
+cv.assistant_header("Qwen-X")
+check("en vivo: si cambia el modelo entre respuestas seguidas, sale otro encabezado", "Qwen-X" in cv.get_text(), cv.get_text())
+
 root.destroy()
 print("\nFALLAS:", fallas if fallas else "ninguna")
 raise SystemExit(1 if fallas else 0)

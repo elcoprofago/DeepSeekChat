@@ -187,7 +187,7 @@ def repair(messages):
 
 class Agent:
     def __init__(self, make_stream, toolbox=None, max_steps=DEFAULT_MAX_STEPS, budget_chars=600000,
-                 ctx_tokens=None, reserve_tokens=0, overhead_chars=0, chars_per_token=DEFAULT_CHARS_PER_TOKEN):
+                 ctx_tokens=None, reserve_tokens=0, overhead_chars=0, chars_per_token=DEFAULT_CHARS_PER_TOKEN, label=None):
         """Con ctx_tokens (modelo local) el presupuesto del historial es la ventana menos lo reservado para la
         respuesta (reserve_tokens) y lo que ocupan el prompt de sistema y las herramientas (overhead_chars); si no,
         budget_chars fijo. chars_per_token se recalibra en cada paso y queda en el atributo para la próxima corrida."""
@@ -199,7 +199,13 @@ class Agent:
         self.reserve_tokens = reserve_tokens
         self.overhead_chars = overhead_chars
         self.chars_per_token = chars_per_token
+        self.label = label      # quién contesta: queda en cada respuesta ("_model"), no se deduce del modelo actual
         self._stream = None
+
+    def _stamp(self, msg):
+        if self.label:
+            msg["_model"] = self.label
+        return msg
 
     def budget(self):
         if not self.ctx_tokens:
@@ -248,11 +254,11 @@ class Agent:
             if cancel.is_set():
                 # lo que llegó hasta acá se conserva, pero sin llamadas a medio armar (no habría con qué contestarlas)
                 if content:
-                    messages.append({"role": "assistant", "content": content, "_reasoning": reasoning})
+                    messages.append(self._stamp({"role": "assistant", "content": content, "_reasoning": reasoning}))
                 emit("step_end", {"content": content, "reasoning": reasoning, "finish": finish, "calls": []})
                 return "cancelled"
 
-            msg = {"role": "assistant", "content": content}
+            msg = self._stamp({"role": "assistant", "content": content})
             if reasoning:
                 msg["_reasoning"] = reasoning
             if calls:

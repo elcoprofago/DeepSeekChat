@@ -9,6 +9,7 @@ import os
 import socket
 import subprocess
 import time
+from datetime import datetime
 import urllib.error
 import urllib.request
 from ctypes import wintypes
@@ -240,6 +241,8 @@ def _free_port():
 
 # ---------------------------------------------------------------- el servidor
 
+LOG_MAX_BYTES = 4 * 1024 * 1024     # al pasarlo, el registro actual pasa a llama-server.log.1 (se conserva uno anterior)
+
 class LocalServer:
     """Un llama-server a la vez. ensure() reutiliza el que ya corre si es el mismo modelo y contexto."""
 
@@ -251,6 +254,8 @@ class LocalServer:
         self.port = None
         self._job = _make_kill_on_close_job()
         self._log = None
+        self._log_start = 0     # desde dónde escribió el intento actual: _tail no muestra líneas de un intento anterior
+        self._t0 = None
         self.log_path = os.path.join(log_dir, "llama-server.log")
 
     @property
@@ -262,11 +267,37 @@ class LocalServer:
 
     def _tail(self, n=6):
         try:
-            with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = [l.rstrip() for l in f.readlines() if l.strip()]
+            with open(self.log_path, "rb") as f:
+                f.seek(self._log_start)
+                text = f.read().decode("utf-8", errors="replace")
+            lines = [l.rstrip() for l in text.splitlines() if l.strip() and not l.startswith("=====")]
             return "\n".join(lines[-n:])
         except OSError:
             return ""
+
+    def _mark(self, text):
+        """Una línea propia en el registro. Antes cada intento lo pisaba y no quedaba cómo había terminado: un modelo
+        que «nunca cargó» dejaba un registro cortado a la mitad, sin decir si se canceló, se colgó o se cayó."""
+        if self._log is None:
+            return
+        try:
+            when = f" a los {time.time() - self._t0:.0f} s" if self._t0 else ""
+            self._log.write(f"===== {datetime.now():%Y-%m-%d %H:%M:%S} {text}{when}\n".encode("utf-8"))
+            self._log.flush()
+        except (OSError, ValueError):
+            pass
+
+    def _open_log(self, model_path, ctx):
+        try:
+            if os.path.getsize(self.log_path) > LOG_MAX_BYTES:
+                os.replace(self.log_path, self.log_path + ".1")
+        except OSError:
+            pass
+        self._log = open(self.log_path, "ab")
+        self._log.seek(0, os.SEEK_END)
+        self._t0 = None
+        self._mark(f"intento: {os.path.basename(model_path)} (ctx {ctx})")
+        self._log_start = self._log.tell()
 
     def ensure(self, model_path, ctx=None, cancel=None, timeout=300, reasoning=None):
         """Deja corriendo el servidor con ese modelo y devuelve la URL base. Bloquea hasta que responde /health.
@@ -287,12 +318,14 @@ class LocalServer:
         if self.threads:
             args += ["-t", str(self.threads)]
         self.args = args
-        self._log = open(self.log_path, "wb")
+        self._open_log(model_path, ctx)
         flags = 0x08000000   # CREATE_NO_WINDOW
         try:
             self.proc = subprocess.Popen(args, stdout=self._log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                          cwd=os.path.dirname(self.exe), creationflags=flags)
         except OSError as e:
+            self._mark(f"no arrancó: {e}")
+            self.stop()
             raise LocalError(f"No se pudo arrancar llama-server: {e}")
         if self._job:
             try:
@@ -300,13 +333,15 @@ class LocalServer:
             except Exception:
                 pass
         self.model = (os.path.normcase(model_path), ctx, reasoning)
-        t0 = time.time()
+        t0 = self._t0 = time.time()
         url = f"http://127.0.0.1:{self.port}/health"
         while True:
             if cancel is not None and cancel.is_set():
+                self._mark("cancelado por el usuario mientras cargaba")
                 self.stop()
                 raise LocalError("Cancelado mientras se cargaba el modelo.")
             if self.proc.poll() is not None:
+                self._mark(f"llama-server terminó solo (código {self.proc.returncode})")
                 tail = self._tail()
                 self.stop()
                 low = tail.lower()
@@ -317,12 +352,14 @@ class LocalServer:
             try:
                 with urllib.request.urlopen(url, timeout=2) as r:
                     if r.status == 200:
+                        self._mark("listo")
                         return self.base
             except urllib.error.HTTPError:
                 pass            # 503 mientras carga el modelo
             except (OSError, ValueError):
                 pass
             if time.time() - t0 > timeout:
+                self._mark(f"sin respuesta tras {timeout} s: se detiene")
                 tail = self._tail()
                 self.stop()
                 raise LocalError(f"El modelo no estuvo listo en {timeout} s.\n{tail}")
@@ -338,6 +375,7 @@ class LocalServer:
             except subprocess.TimeoutExpired:
                 p.kill()
                 p.wait(5)
+            self._mark("detenido por la app")
         if self._log is not None:
             try:
                 self._log.close()
