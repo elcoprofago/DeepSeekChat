@@ -317,6 +317,67 @@ r = exd("run_command", {"command": "git push"})
 check("otros bloqueos no llevan la pista de borrar", r.startswith("BLOCKED") and "delete_path" not in r, r)
 os.remove(os.path.join(ws, "borrame3.txt"))
 
+# ---- lo que pisa un comando se respalda antes y se puede deshacer (caso real: sesión cronometro, 2026-09-26:
+# `copy /b A + B + C dist\Cronometro_v021.exe` reemplazó el exe con aprobación "all" y sin copia)
+W = lambda *p: os.path.normcase(os.path.join(ws, *p))
+casos = [("copy /b a.bin + b.bin + c.bin dist\\app.exe", [W("dist", "app.exe")]),
+         ("copy /b a.bin+b.bin dist\\app.exe", [W("dist", "app.exe")]),
+         ("copy /Y calc.py sub", [W("sub", "calc.py")]),
+         ("move x.txt y.txt", [W("y.txt")]),
+         ("echo hola > out.txt 2>&1", [W("out.txt")]),
+         ("python x.py >> log.txt 2>nul", [W("log.txt")]),
+         ('echo a > "con espacio.txt"', [W("con espacio.txt")]),
+         ("cd /d sub && copy ..\\calc.py b.txt", [W("sub", "b.txt")]),
+         ("powershell -NoProfile -Command \"Copy-Item a.txt -Destination 'b c.txt' -Force\"", [W("b c.txt")]),
+         ("powershell -c \"Set-Content -Path x.txt -Value hola\"", [W("x.txt")]),
+         ("powershell -c \"'hola' | Out-File -Encoding utf8 y.txt\"", [W("y.txt")]),
+         ('git commit -m "a > b"', []), ("echo x > nul", []), ("dir 2>&1", []), ("copy calc.py *.bak", []),
+         ("python -m pytest -q", []), ("npm run build", [])]
+for c, esperado in casos:
+    got = [os.path.normcase(p) for p in at.overwrite_targets(c, ws)]
+    check(f"destino reconocido: {c}", got == esperado, got)
+
+bk_o = os.path.join(base, "respaldos_comandos")
+tb_o = at.ToolBox(ws, confirm=confirm_no, approval="all", backup_dir=bk_o)       # "all": confirm nunca se llama
+os.makedirs(os.path.join(ws, "dist"))
+mk(os.path.join(ws, "dist", "app.exe"), b"MZ EXE BUENO\n" * 50)
+mk(os.path.join(ws, "a.bin"), b"AAA")
+mk(os.path.join(ws, "b.bin"), b"BBB")
+h_exe = sha(os.path.join(ws, "dist", "app.exe"))
+r = tb_o.execute("run_command", {"command": "copy /b a.bin + b.bin dist\\app.exe"})
+check("caso real: el copy /b corre igual (no se bloquea)", "exit code 0" in r and open(os.path.join(ws, "dist", "app.exe"), "rb").read() == b"AAABBB", r)
+check("caso real: el resultado le dice al modelo que quedó una copia", "kept a copy" in r and "dist/app.exe" in r, r)
+msg = tb_o.undo_last()
+check("caso real: deshacer devuelve el exe original byte a byte", sha(os.path.join(ws, "dist", "app.exe")) == h_exe and tb_o.journal == [], msg)
+
+mk(os.path.join(ws, "salida.txt"), b"lo de antes\n")
+r = tb_o.execute("run_command", {"command": "echo nuevo> salida.txt"})
+check("redirección >: pisa, y queda la copia", open(os.path.join(ws, "salida.txt"), "rb").read().startswith(b"nuevo") and len(tb_o.journal) == 1, r)
+tb_o.undo_last()
+check("redirección >: deshacer la restaura", open(os.path.join(ws, "salida.txt"), "rb").read() == b"lo de antes\n")
+r = tb_o.execute("run_command", {"command": "powershell -NoProfile -Command \"Copy-Item a.bin -Destination salida.txt -Force\""})
+check("PowerShell Copy-Item: pisa, y queda la copia", open(os.path.join(ws, "salida.txt"), "rb").read() == b"AAA" and len(tb_o.journal) == 1, r)
+tb_o.undo_last()
+check("PowerShell Copy-Item: deshacer la restaura", open(os.path.join(ws, "salida.txt"), "rb").read() == b"lo de antes\n")
+
+n_bk = len(os.listdir(bk_o))
+r = tb_o.execute("run_command", {"command": "copy no_existe.bin salida.txt"})
+check("CONTROL: si el comando falla y no toca el destino, no queda entrada en el diario ni copia suelta",
+      tb_o.journal == [] and len(os.listdir(bk_o)) == n_bk and "kept a copy" not in r, (r, os.listdir(bk_o)))
+check("CONTROL: un destino fuera de la carpeta no se respalda desde acá",
+      tb_o._overwritable("copy calc.py ..\\afuera\\secreto.txt") == [])
+check("CONTROL: un comando sin destinos no genera copias", tb_o.execute("run_command", {"command": "echo hola"}) and tb_o.journal == [])
+
+pedidos.clear()
+tb_p = at.ToolBox(ws, confirm=confirm_no, approval="ask", backup_dir=bk_o)
+n_bk = len(os.listdir(bk_o))
+r = tb_p.execute("run_command", {"command": "copy /b a.bin + b.bin dist\\app.exe"})
+check("con aprobación 'ask', el pedido de permiso dice qué archivo se pisa", "Sobrescribe" in pedidos[0][2] and "dist/app.exe" in pedidos[0][2], pedidos)
+check("denegado: no se ejecuta ni se hace copia", r.startswith("DENIED") and sha(os.path.join(ws, "dist", "app.exe")) == h_exe
+      and len(os.listdir(bk_o)) == n_bk, r)
+for f in ("a.bin", "b.bin", "salida.txt"):
+    os.remove(os.path.join(ws, f))
+
 # ---- protocolo
 check("herramienta desconocida: error que lista las válidas", "unknown tool" in ex("format_disk", {}) and "read_file" in ex("format_disk", {}))
 check("argumentos de más: error claro, no excepción", ex("read_file", {"path": "calc.py", "basura": 1}).startswith("ERROR"))

@@ -4,13 +4,15 @@ Sin ventana ni red: se prueba sola. Todo lo que el modelo puede hacerle al disco
 
 Reglas de fondo:
   * Nada fuera de la carpeta de trabajo (se resuelve el camino real, así que un junction no sirve de puerta).
-  * Antes de pisar un archivo se guarda una copia; cada cambio queda en un diario y se puede deshacer.
+  * Antes de pisar un archivo se guarda una copia; cada cambio queda en un diario y se puede deshacer. Vale también
+    para lo que pisa un comando (copy, move, `>`...), en los casos que overwrite_targets reconoce.
   * Los comandos destructivos o interactivos se bloquean siempre, aunque el usuario haya dado permiso total.
   * Borrar se hace con delete_path, no con `del`/`rm`: pide permiso, no sigue enlaces y deja lo borrado en una copia que se restaura.
   * Toda salida que vuelve al modelo va truncada: un log gigante no puede reventar el contexto.
 """
 import ctypes
 import difflib
+import filecmp
 import fnmatch
 import json
 import os
@@ -99,6 +101,128 @@ def check_command(command):
         if rx.search(command):
             return why
     return _git_index_risk(command)
+
+
+# ---------------------------------------------------------------- sobrescrituras de comandos
+# Un comando de consola puede pisar un archivo sin pasar por write_file (caso real, sesión cronometro 2026-09-26:
+# `copy /b A + B + C dist\Cronometro_v021.exe` reemplazó el exe con aprobación "all" y sin copia). No se bloquea
+# —copiar es trabajo normal—: se reconoce el destino y se guarda una copia antes, para que «Deshacer» lo alcance.
+# Es un reconocimiento de lo común (copy/move/cp/mv, Copy-Item/Move-Item, Set-Content/Out-File/Add-Content, `>`
+# y `>>`), no un intérprete de cmd: variables, comodines, xcopy/robocopy y lo que escribe un programa quedan afuera.
+
+_PS_SWITCHES = {"-force", "-recurse", "-append", "-nonewline", "-passthru", "-whatif", "-confirm", "-noclobber", "-container"}
+_COPY_CMDS = {"copy", "move", "cp", "mv", "copy-item", "move-item", "cpi", "mi"}
+_WRITE_CMDS = {"set-content", "out-file", "add-content", "sc", "ac"}
+_CD_CMDS = {"cd", "chdir", "pushd", "set-location", "sl"}
+_PS_INNER = re.compile(r"""\b(?:powershell|pwsh)(?:\.exe)?\b[^"']*?-c(?:ommand)?\s+(["'])(.*?)\1""", re.I | re.S)
+
+
+def _split_segments(command):
+    """Parte en comandos simples por && || & | ; y saltos de línea, fuera de comillas. `2>&1` no es un separador."""
+    segs, cur, q, i = [], [], None, 0
+    while i < len(command):
+        ch = command[i]
+        if q:
+            q = None if ch == q else q
+        elif ch in "\"'":
+            q = ch
+        elif ch in "&|;\n" and not (ch == "&" and cur and cur[-1] == ">"):
+            segs.append("".join(cur))
+            cur = []
+            if command[i:i + 2] in ("&&", "||"):
+                i += 1
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    segs.append("".join(cur))
+    return [s.strip() for s in segs if s.strip()]
+
+
+def _redirects(seg):
+    """Saca las redirecciones `>`/`>>` fuera de comillas. Devuelve (segmento sin ellas, destinos a archivo)."""
+    rest, targets, q, i = [], [], None, 0
+    while i < len(seg):
+        ch = seg[i]
+        if q:
+            q = None if ch == q else q
+        elif ch in "\"'":
+            q = ch
+        elif ch == ">":
+            if rest and rest[-1].isdigit():
+                rest.pop()                                   # 2>, 1>
+            i += 2 if seg[i:i + 2] == ">>" else 1
+            m = re.match(r"""\s*("[^"]*"|'[^']*'|[^\s&|<>]+)""", seg[i:])
+            if m:
+                t = m.group(1).strip("\"'")
+                if not t.startswith("&") and t.lower() not in ("nul", "con", "$null"):
+                    targets.append(t)
+                i += m.end()
+            continue
+        rest.append(ch)
+        i += 1
+    return "".join(rest), targets
+
+
+def _tokens(seg):
+    return [t.strip("\"'") for t in re.findall(r""""[^"]*"|'[^']*'|[^\s"']+""", seg)]
+
+
+def _positional(args):
+    """(posicionales, {parámetro PowerShell: valor}). `/b` y compañía son opciones de cmd; `-X valor` de PowerShell."""
+    pos, named, i = [], {}, 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("/") and len(a) <= 3:
+            pass
+        elif a.startswith("-") and len(a) > 1:
+            if a.lower() not in _PS_SWITCHES and i + 1 < len(args) and not args[i + 1].startswith("-"):
+                named[a.lower()] = args[i + 1]
+                i += 1
+        elif a != "+":
+            pos += [p for p in a.split("+") if p]            # copy A+B dest
+        i += 1
+    return pos, named
+
+
+def overwrite_targets(command, cwd):
+    """Rutas absolutas que el comando puede sobrescribir, según lo que se reconoce (ver arriba)."""
+    out = []
+    for m in _PS_INNER.finditer(command):
+        out += overwrite_targets(m.group(2), cwd)
+    for seg in _split_segments(command):
+        seg, reds = _redirects(seg)
+        out += [os.path.join(cwd, t) for t in reds]
+        toks = _tokens(seg)
+        if not toks:
+            continue
+        name, (pos, named) = toks[0].lower(), _positional(toks[1:])
+        if name.endswith(".exe"):
+            name = name[:-4]
+        if name in _CD_CMDS and pos:
+            cwd = os.path.join(cwd, pos[-1])
+        elif name in _COPY_CMDS:
+            src = pos[:-1] if "-destination" not in named and len(pos) > 1 else pos
+            src = [named["-path"]] if "-path" in named else [named["-literalpath"]] if "-literalpath" in named else src
+            dest = named.get("-destination") or (pos[-1] if len(pos) > 1 else ".")
+            dest = os.path.join(cwd, dest)
+            if os.path.isdir(dest):
+                out += [os.path.join(dest, os.path.basename(s.rstrip("\\/"))) for s in src]
+            else:
+                out.append(dest)
+        elif name in _WRITE_CMDS:
+            t = named.get("-path") or named.get("-filepath") or named.get("-literalpath") or (pos[0] if pos else None)
+            if t:
+                out.append(os.path.join(cwd, t))
+    seen, res = set(), []
+    for p in out:
+        if "*" in p or "?" in p:
+            continue
+        k = os.path.normcase(os.path.normpath(p))
+        if k not in seen:
+            seen.add(k)
+            res.append(os.path.normpath(p))
+    return res
 
 
 # ---------------------------------------------------------------- borrado
@@ -475,8 +599,45 @@ class ToolBox:
             return (f"BLOCKED by the safety filter ({why}). This command is never run automatically. "
                     "Tell the user what you wanted to do so they can do it themselves. If a harmless word in a file name or text "
                     "triggered it, rephrase: for a commit message, write it to a file and use `git commit -F file`." + hint)
-        if not self._ask("command", "Ejecutar comando", command):
+        pisa = self._overwritable(command)
+        detalle = command + ("\n\nSobrescribe (se guarda una copia antes; «Deshacer cambio» la restaura): "
+                             + ", ".join(self.rel(p) for p in pisa) if pisa else "")
+        if not self._ask("command", "Ejecutar comando", detalle):
             return "DENIED: the user did not allow this command. Do not retry it; ask the user what they want."
+        copias = [(p, self._backup(p)) for p in pisa]
+        try:
+            result = self._run(command, timeout, cancel)
+        finally:
+            guardadas = self._keep_changed(copias)
+        if guardadas:
+            result += ("\n[DeepSeekChat kept a copy of what this command overwrote: " + ", ".join(guardadas)
+                       + ". The user can restore it with undo.]")
+        return result
+
+    def _overwritable(self, command):
+        """Archivos existentes dentro de la carpeta de trabajo que el comando puede pisar (ver overwrite_targets)."""
+        res = []
+        for t in overwrite_targets(command, self.root):
+            try:
+                p = self.resolve(t)
+            except ToolError:
+                continue                     # fuera de la carpeta, inexistente o prohibido: nada que respaldar desde acá
+            if os.path.isfile(p) and not _is_link(p) and os.path.getsize(p) <= MAX_DELETE_BYTES:
+                res.append(p)
+        return res
+
+    def _keep_changed(self, copias):
+        """Tras el comando: al diario van solo los archivos que de verdad cambiaron; las copias de los intactos se borran."""
+        guardadas = []
+        for p, b in copias:
+            if os.path.isfile(p) and filecmp.cmp(p, b, shallow=False):
+                os.remove(b)
+                continue
+            self.journal.append({"path": p, "backup": b, "when": time.strftime("%Y-%m-%d %H:%M:%S")})
+            guardadas.append(self.rel(p))
+        return guardadas
+
+    def _run(self, command, timeout, cancel):
         timeout = max(1, min(int(timeout), MAX_TIMEOUT))
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         # Los programas de Python y Node escriben UTF-8 si se les pide; los comandos propios de cmd (dir, type)
