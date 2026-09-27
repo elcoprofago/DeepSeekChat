@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 import agent_tools as at
 import dsapi
 import localmodels
+import version
 
 TITULO = "DeepSeek Chat"
 
@@ -294,6 +295,7 @@ class SettingsDialog:
         ttk.Button(bf, text="Guardar opciones", style="Accent.TButton", command=self.save_options).pack(side="right", padx=8)
         self.opt_msg = ttk.Label(outer, text="Los cambios se guardan solos al cerrar esta ventana.", style="Muted.TLabel", wraplength=560, justify="left")
         self.opt_msg.pack(fill="x", pady=(6, 0))
+        ttk.Label(outer, text=f"DeepSeek Chat versión {version.VERSION}", style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
         w.protocol("WM_DELETE_WINDOW", self.close)
         self._snap = self._snapshot()
         _place(w, app)

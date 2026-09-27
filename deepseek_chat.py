@@ -25,9 +25,10 @@ import prompts
 import remote
 import sessions
 import theme
+import version
 
 TITULO = "DeepSeek Chat"
-TITULO_VENTANA = "DeepSeek Chat - © R.A. Sistemas - 2026"      # mismo formato que la ventana de USBagent
+TITULO_VENTANA = f"DeepSeek Chat v{version.VERSION} - © R.A. Sistemas - 2026"      # formato de USBagent, más la versión
 ICONO = "asterisc.ico"      # junto a los .py; el mismo va embebido en el lanzador DeepSeekChat.exe
 GEOMETRIA_INICIAL = "1240x780"
 SIN_EFFORT = "(por defecto)"

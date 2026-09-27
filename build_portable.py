@@ -11,6 +11,7 @@ Resultado (por defecto en dist\\DeepSeekChat):
     DeepSeekChat.exe  lanzador nativo con el ícono (se compila de launcher\\ con las Build Tools de Visual Studio;
                       si no están, se avisa y queda solo el .bat, que hace lo mismo)
     portable.flag, DeepSeekChat.bat, DeepSeekChat-consola.bat, Diagnostico.bat, LEEME.txt
+    VERSION.txt       qué versión tiene esta carpeta, para saberlo sin abrir la aplicación
 
 Seguridad: app\\, runtime\\ y bin\\ llevan un archivo marcador; solo se reemplazan si lo tienen. Si existe una carpeta
 con ese nombre SIN marcador, el script se detiene en vez de pisarla. data\\ y Models\\ nunca se borran ni se reemplazan.
@@ -23,6 +24,8 @@ import shutil
 import subprocess
 import sys
 import time
+
+import version
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MARKER = ".build_portable"
@@ -228,6 +231,7 @@ LEEME = """DeepSeek Chat portable
 ======================
 
 Doble clic en DeepSeekChat.exe (DeepSeekChat.bat hace lo mismo, por si el .exe faltara).
+La version esta en VERSION.txt y en el titulo de la ventana.
 
 - Todo lo que la aplicacion guarda (configuracion, sesiones, tu API key cifrada, registros) queda en la carpeta data\\
   de esta misma carpeta. No escribe en el equipo donde la enchufes (ni en %APPDATA%).
@@ -254,6 +258,16 @@ MODELS_README = ("Copia aqui los modelos locales (archivos .gguf).\r\nAparecen e
 def write_text(path, text, newline=None):
     with open(path, "w", encoding="ascii" if newline else "utf-8", newline=newline) as f:
         f.write(text)
+
+
+def version_txt():
+    """Primera línea: la que compara selftest.py. Al actualizar solo app\\ en un pendrive hay que reescribirlo también."""
+    return (f"DeepSeek Chat {version.VERSION}\r\n\r\nVersion de esta carpeta. La que corre de verdad es la del titulo de la "
+            "ventana;\r\nsi no coinciden, Diagnostico.bat lo avisa.\r\n")
+
+
+def write_version_txt(out):
+    write_text(os.path.join(out, "VERSION.txt"), version_txt(), newline="")
 
 
 def main():
@@ -297,7 +311,8 @@ def main():
     write_text(os.path.join(out, "DeepSeekChat.bat"), LAUNCHER, newline="")
     write_text(os.path.join(out, "DeepSeekChat-consola.bat"), LAUNCHER_CONSOLE, newline="")
     write_text(os.path.join(out, "Diagnostico.bat"), DIAGNOSTICO, newline="")
-    write_text(os.path.join(out, "LEEME.txt"), LEEME.replace("\n", "\r\n"))
+    write_text(os.path.join(out, "LEEME.txt"), LEEME.replace("\n", "\r\n"), newline="")    # sin newline="" quedaba \r\r\n
+    write_version_txt(out)
     if not a.sin_exe:
         build_launcher(out)
     say(f"Armado en {time.time() - t0:.1f} s")

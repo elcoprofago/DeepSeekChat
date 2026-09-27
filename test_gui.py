@@ -24,6 +24,7 @@ import dsapi
 import localmodels
 import sessions
 import theme
+import version
 
 SHOTS = sys.argv[1] if len(sys.argv) > 1 else ""
 if SHOTS:
@@ -474,8 +475,9 @@ check("boton de menu la vuelve a mostrar", str(app.side) in app.main.panes() and
 shot("03_final.png")
 
 # ---------------------------------------------------------------- título, medidor de tokens, tema oscuro
-check("título de la ventana como el de USBagent (y fijo aunque cambie la sesión)",
-      dc.TITULO_VENTANA == "DeepSeek Chat - \u00a9 R.A. Sistemas - 2026" and root.title() == dc.TITULO_VENTANA, root.title())
+check("título de la ventana como el de USBagent, con la versión (y fijo aunque cambie la sesión)",
+      dc.TITULO_VENTANA == f"DeepSeek Chat v{version.VERSION} - \u00a9 R.A. Sistemas - 2026" and root.title() == dc.TITULO_VENTANA, root.title())
+check("la versión tiene cuatro números", len(version.VERSION.split(".")) == 4 and all(x.isdigit() for x in version.VERSION.split(".")), version.VERSION)
 check("el tema por defecto es el oscuro azul", dsapi.Config.DEFAULTS["theme"] == "oscuro"
       and all(k in theme.THEMES[n] for n in theme.THEMES for k in ("meter_fill", "accent_text")))
 

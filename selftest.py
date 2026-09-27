@@ -47,6 +47,21 @@ def probar(nombre, fn, critico=True):
 out("INFO", f"Python {sys.version.split()[0]} en {sys.executable}")
 out("INFO", f"Windows {platform.version()} ({platform.machine()})")
 out("INFO", f"Carpeta de la aplicación: {APP}")
+
+
+def version_app():
+    import version
+    v = version.VERSION
+    txt = os.path.join(os.path.dirname(APP), "VERSION.txt")
+    if os.path.isfile(txt):
+        with open(txt, encoding="utf-8", errors="replace") as f:
+            dice = f.readline().strip()
+        if dice != f"DeepSeek Chat {v}":
+            raise RuntimeError(f"app\\ es {v} pero VERSION.txt dice «{dice}» (se actualizó app\\ sin reescribir VERSION.txt)")
+    return v
+
+
+probar("Versión", version_app, critico=False)
 out("INFO", "sys.path: " + " | ".join(sys.path))
 
 
