@@ -30,6 +30,8 @@ import version
 TITULO = "DeepSeek Chat"
 TITULO_VENTANA = f"DeepSeek Chat v{version.VERSION} - © R.A. Sistemas - 2026"      # formato de USBagent, más la versión
 ICONO = "asterisc.ico"      # junto a los .py; el mismo va embebido en el lanzador DeepSeekChat.exe
+IMG_ENVIAR = "b-env.png"    # botón de enviar; junto a los .py
+IMG_DETENER = "b-stop.png"  # el mismo botón mientras el agente trabaja
 GEOMETRIA_INICIAL = "1240x780"
 SIN_EFFORT = "(por defecto)"
 APPROVALS = {"ask": "Preguntar todo", "edits": "Editar sin preguntar", "all": "Todo sin preguntar"}
@@ -217,7 +219,8 @@ class App:
         ttk.Button(head, text="+ Nueva", command=self.new_session).pack(side="right")
         tbox = ttk.Frame(sess_box)
         tbox.pack(fill="both", expand=True)
-        self.sess_tree = ttk.Treeview(tbox, columns=("title", "folder"), show="headings", selectmode="browse", height=6)
+        self.sess_tree = ttk.Treeview(tbox, columns=("title", "folder"), show="headings", selectmode="browse", height=6,
+                                     style="Side.Treeview")
         self.sess_tree.heading("title", text="Sesión")
         self.sess_tree.heading("folder", text="Carpeta")
         self.sess_tree.column("title", width=150, stretch=True)
@@ -250,7 +253,15 @@ class App:
         self.input.pack(side="left", fill="x", expand=True)
         self.input.bind("<Return>", self._on_enter)
         self.input.bind("<Shift-Return>", lambda e: None)
-        self.btn_send = ttk.Button(self.bottom, text="Enviar", width=9, command=self.on_send_click)
+        # imagen de enviar / detener; el texto queda guardado (con imagen, tk no lo muestra) y es el de respaldo si
+        # falta alguna de las dos imágenes
+        self.img_send = self._load_image(IMG_ENVIAR)
+        self.img_stop = self._load_image(IMG_DETENER)
+        if self.img_send and self.img_stop:
+            self.btn_send = tk.Button(self.bottom, text="Enviar", image=self.img_send, bd=0,
+                                      relief="flat", highlightthickness=0, cursor="hand2", command=self.on_send_click)
+        else:
+            self.btn_send = ttk.Button(self.bottom, text="Enviar", width=9, command=self.on_send_click)
         self.btn_send.pack(side="left", anchor="s", padx=(8, 0))
         # solo se ve cuando el agente cortó por el tope de pasos: un clic y sigue, sin escribir nada
         self.btn_continue = ttk.Button(self.bottom, text="Continuar", width=10, command=self.continue_run,
@@ -353,6 +364,14 @@ class App:
         except (AttributeError, OSError, tk.TclError):
             pass
 
+    def _load_image(self, name):
+        """PhotoImage de un archivo junto a los .py, o None si falta o Tk no lo puede leer (entonces va el botón con texto)."""
+        p = os.path.join(dsapi.APP_DIR, name)
+        try:
+            return tk.PhotoImage(master=self.root, file=p) if os.path.isfile(p) else None
+        except tk.TclError:
+            return None
+
     def _place_sash(self):
         try:
             self.main.sashpos(0, int(self.cfg["sidebar_w"]))
@@ -376,9 +395,12 @@ class App:
         theme.apply_styles(self.root, t)
         fs = int(self.cfg["font_size"])
         self.chat.apply_theme(t, fs)
-        self.input.configure(bg=t["panel"], fg=t["fg"], insertbackground=t["fg"], highlightbackground=t["border"],
+        self.input.configure(bg=t["side"], fg=t["fg"], insertbackground=t["fg"], highlightbackground=t["border"],
                              highlightcolor=t["accent"], font=("Segoe UI", fs))
-        self.btn_send.configure(style="Accent.TButton")
+        if isinstance(self.btn_send, tk.Button):
+            self.btn_send.configure(bg=t["bg"], activebackground=t["bg"])
+        else:
+            self.btn_send.configure(style="Accent.TButton")
         self.sess_tree.tag_configure("cur", font=("Segoe UI", 10, "bold"))
         self._dark_titlebar()
         self._draw_meter()
@@ -1099,6 +1121,12 @@ class App:
     def _set_busy(self, busy):
         self.busy = busy
         self.btn_send.configure(text="Detener" if busy else "Enviar")
+        if self.img_send and self.img_stop:
+            self.btn_send.configure(image=self.img_stop if busy else self.img_send)
+        # scroll automático al final mientras el agente trabaja; se libera cuando termina su respuesta
+        self.chat.follow = busy
+        if busy:
+            self.chat.text.see("end")
         self.btn_undo.configure(state="disabled" if busy else "normal")
         if busy:
             self._set_state("Pensando…")

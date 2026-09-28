@@ -1,9 +1,9 @@
 #!/bin/sh
-# Si el commit cambia algo que termina en la carpeta portable (los .py/.pyw de la app, el icono, build_portable.py o
+# Si el commit cambia algo que termina en la carpeta portable (los .py/.pyw de la app, el icono, las imagenes de botones, build_portable.py o
 # el lanzador), tiene que subir VERSION en version.py. Sin esto, dos pendrives con codigo distinto mostrarian la
 # misma version y el numero del titulo seria una afirmacion falsa.
 # Activado con: git config core.hooksPath hooks
-app=$(git diff --cached --name-only --diff-filter=ACMRD | grep -E '^([^/]+\.pyw?|asterisc\.ico|launcher/.*)$' | grep -vE '^(test_[^/]*|version\.py)$')
+app=$(git diff --cached --name-only --diff-filter=ACMRD | grep -E '^([^/]+\.pyw?|asterisc\.ico|b-(env|stop)\.png|launcher/.*)$' | grep -vE '^(test_[^/]*|version\.py)$')
 [ -z "$app" ] && exit 0
 if git diff --cached -U0 -- version.py | grep -qE '^\+VERSION = '; then
     exit 0

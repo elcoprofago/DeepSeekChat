@@ -3,7 +3,7 @@
 Uso:   python build_portable.py [--out RUTA] [--llama-bin RUTA] [--sin-ucrt] [--sin-exe] [--sin-verificar]
 
 Resultado (por defecto en dist\\DeepSeekChat):
-    app\\       los .py de la aplicación (sin tests ni este script) y su ícono
+    app\\       los .py de la aplicación (sin tests ni este script), su ícono y las imágenes de botones
     runtime\\   un Python recortado y propio (tkinter incluido), sin pip ni site-packages
     bin\\       llama-server.exe y sus DLL, para los modelos locales
     Models\\    aquí van los .gguf (no se toca al rearmar)
@@ -30,6 +30,7 @@ import version
 HERE = os.path.dirname(os.path.abspath(__file__))
 MARKER = ".build_portable"
 ICON = "asterisc.ico"
+IMAGES = ("b-env.png", "b-stop.png")      # botón de enviar / detener de la ventana
 
 APP_EXCLUDE = ("test_*.py", "build_portable.py", "__pycache__")
 LIB_EXCLUDE_DIRS = {"site-packages", "test", "idlelib", "turtledemo", "ensurepip", "venv", "pydoc_data"}
@@ -124,7 +125,7 @@ def fill_app(dst):
     n = 0
     for name in sorted(os.listdir(HERE)):
         p = os.path.join(HERE, name)
-        if os.path.isfile(p) and (name.endswith(".py") or name.endswith(".pyw") or name == ICON):
+        if os.path.isfile(p) and (name.endswith(".py") or name.endswith(".pyw") or name == ICON or name in IMAGES):
             if any(fnmatch.fnmatch(name, pat) for pat in APP_EXCLUDE):
                 continue
             shutil.copy2(p, os.path.join(dst, name))

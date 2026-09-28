@@ -67,6 +67,7 @@ class ChatView:
         self._last_role = None
         self._last_label = None
         self.streaming = False
+        self.follow = False      # mientras el agente trabaja: bajar al final con cada escritura, aunque se haya subido
 
     # ------------------------------------------------------------ tema
 
@@ -101,7 +102,7 @@ class ChatView:
 
     def put(self, text, *tags):
         c = self.text
-        stick = self.at_bottom()
+        stick = self.follow or self.at_bottom()
         c.configure(state="normal")
         c.insert("end", text, tags)
         c.configure(state="disabled")

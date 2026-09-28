@@ -36,7 +36,7 @@ class Explorer:
 
         box = ttk.Frame(self.frame)
         box.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(box, show="tree", selectmode="browse")
+        self.tree = ttk.Treeview(box, show="tree", selectmode="browse", style="Side.Treeview")
         sb = ttk.Scrollbar(box, command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
