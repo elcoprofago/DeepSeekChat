@@ -25,14 +25,12 @@ import subprocess
 import sys
 import time
 
+import actualizar
 import version
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MARKER = ".build_portable"
-ICON = "asterisc.ico"
-IMAGES = ("b-env.png", "b-stop.png")      # botón de enviar / detener de la ventana
 
-APP_EXCLUDE = ("test_*.py", "build_portable.py", "__pycache__")
 LIB_EXCLUDE_DIRS = {"site-packages", "test", "idlelib", "turtledemo", "ensurepip", "venv", "pydoc_data"}
 DLL_EXCLUDE = ("_test*", "_ctypes_test*", "*.ico", "*.cat")
 LLAMA_KEEP = ("llama-server.exe", "llama-server-impl.dll", "llama.dll", "llama-common.dll", "mtmd.dll", "ggml*.dll",
@@ -125,9 +123,7 @@ def fill_app(dst):
     n = 0
     for name in sorted(os.listdir(HERE)):
         p = os.path.join(HERE, name)
-        if os.path.isfile(p) and (name.endswith(".py") or name.endswith(".pyw") or name == ICON or name in IMAGES):
-            if any(fnmatch.fnmatch(name, pat) for pat in APP_EXCLUDE):
-                continue
+        if os.path.isfile(p) and actualizar.es_archivo_de_app(name):      # el actualizador elige igual
             shutil.copy2(p, os.path.join(dst, name))
             n += 1
     say(f"  app: {n} archivos")
@@ -225,6 +221,8 @@ def build_launcher(out):
 LAUNCHER = "@echo off\r\nstart \"\" \"%~dp0runtime\\pythonw.exe\" -I \"%~dp0app\\DeepSeekChat.pyw\"\r\n"
 LAUNCHER_CONSOLE = ("@echo off\r\n\"%~dp0runtime\\python.exe\" -I \"%~dp0app\\DeepSeekChat.pyw\"\r\n"
                     "echo.\r\necho (la aplicacion se cerro; codigo %errorlevel%)\r\npause\r\n")
+ACTUALIZAR = ("@echo off\r\ncd /d \"%~dp0\"\r\n\"%~dp0runtime\\python.exe\" -I \"%~dp0app\\actualizar.py\"\r\n"
+              "echo.\r\npause\r\n")
 DIAGNOSTICO = ("@echo off\r\n\"%~dp0runtime\\python.exe\" -I \"%~dp0app\\selftest.py\"\r\n"
                "echo.\r\necho El informe quedo en la carpeta data\\diagnostico.txt\r\npause\r\n")
 
@@ -243,6 +241,8 @@ La version esta en VERSION.txt y en el titulo de la ventana.
 - Si algo no arranca: Diagnostico.bat revisa el equipo y guarda un informe en data\\diagnostico.txt.
   Si la ventana no llega a abrirse, los errores quedan en data\\error.log. DeepSeekChat-consola.bat muestra los errores
   en pantalla.
+- Actualizar.bat baja la ultima version publicada en GitHub y reemplaza app\\ (la anterior queda al lado como
+  app.respaldo-...). No toca data\\, Models\\, runtime\\ ni bin\\. Hay que cerrar la aplicacion antes.
 - runtime\\ es un Python propio recortado (sin pip). bin\\ y runtime\\ se pueden regenerar con build_portable.py;
   data\\ y Models\\ son tuyos y el script nunca los toca.
 
@@ -261,14 +261,8 @@ def write_text(path, text, newline=None):
         f.write(text)
 
 
-def version_txt():
-    """Primera línea: la que compara selftest.py. Al actualizar solo app\\ en un pendrive hay que reescribirlo también."""
-    return (f"DeepSeek Chat {version.VERSION}\r\n\r\nVersion de esta carpeta. La que corre de verdad es la del titulo de la "
-            "ventana;\r\nsi no coinciden, Diagnostico.bat lo avisa.\r\n")
-
-
 def write_version_txt(out):
-    write_text(os.path.join(out, "VERSION.txt"), version_txt(), newline="")
+    actualizar.escribir_version_txt(out, version.VERSION)
 
 
 def main():
@@ -312,6 +306,7 @@ def main():
     write_text(os.path.join(out, "DeepSeekChat.bat"), LAUNCHER, newline="")
     write_text(os.path.join(out, "DeepSeekChat-consola.bat"), LAUNCHER_CONSOLE, newline="")
     write_text(os.path.join(out, "Diagnostico.bat"), DIAGNOSTICO, newline="")
+    write_text(os.path.join(out, "Actualizar.bat"), ACTUALIZAR, newline="")
     write_text(os.path.join(out, "LEEME.txt"), LEEME.replace("\n", "\r\n"), newline="")    # sin newline="" quedaba \r\r\n
     write_version_txt(out)
     if not a.sin_exe:
