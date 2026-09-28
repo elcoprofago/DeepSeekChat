@@ -346,7 +346,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         if u.path not in ("/api/send", "/api/cancel", "/api/continue", "/api/confirm", "/api/session/switch",
-                          "/api/session/new", "/api/model", "/api/upload"):
+                          "/api/session/new", "/api/model", "/api/upload", "/api/power"):
             self._json(404, {"error": "no existe"})
             return
         if not self._authorized():
@@ -379,6 +379,8 @@ class _Handler(BaseHTTPRequestHandler):
                 ok, msg = b.cancel()
             elif u.path == "/api/continue":
                 ok, msg = b.continue_run()
+            elif u.path == "/api/power":
+                ok, msg = b.power(str(d.get("action") or ""))
             else:
                 ok, msg = b.confirm(d.get("id"), bool(d.get("allow")))
         except Exception as e:                  # noqa: BLE001
@@ -513,6 +515,9 @@ class AppBridge:
 
     def confirm(self, cid, allow):
         return self.app.call_ui(lambda: self.app.remote_confirm(cid, allow))
+
+    def power(self, action):
+        return self.app.call_ui(lambda: self.app.remote_power(action))
 
 
 PAGE = r"""<!doctype html>

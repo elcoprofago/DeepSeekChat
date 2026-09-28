@@ -9,6 +9,7 @@ import json
 import os
 import queue
 import re
+import subprocess
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -39,9 +40,33 @@ MUTATING = {"write_file", "edit_file", "delete_path", "run_command"}
 CONTINUE_TEXT = "Seguí con lo que estabas haciendo, desde donde quedaste."
 BUSY_SESSION_NOTE = "Hay un agente trabajando. Esperá a que termine o presioná «Detener» antes de cambiar de sesión."
 BUSY_MODEL_NOTE = "Hay un agente trabajando. Esperá a que termine o presioná «Detener» antes de cambiar de modelo."
+BUSY_POWER_NOTE = "Hay un agente trabajando. Esperá a que termine o presioná «Detener» antes de apagar o suspender la PC."
+SHUTDOWN_DELAY = 60     # segundos entre el pedido del celular y el apagado; en ese tiempo se puede cancelar en la PC
+SUSPEND_DELAY_MS = 3000  # la respuesta HTTP sale antes de que la PC se suspenda
 REMOTE_BUDGET = 600000
 LOCAL_TIMEOUT = 900
 miles = chatview.miles
+
+
+def system_power(action):
+    """Lo único que toca de verdad la energía de la PC ("shutdown", "cancel" o "suspend"). Devuelve (ok, mensaje).
+    Los tests la reemplazan por app.power_fn: nunca se apaga la PC en un test."""
+    if action == "suspend":
+        ok = ctypes.windll.powrprof.SetSuspendState(False, False, False)
+        return bool(ok), "" if ok else f"Windows no suspendió la PC (error {ctypes.GetLastError()})."
+    if action == "shutdown":
+        args = ["shutdown", "/s", "/t", str(SHUTDOWN_DELAY), "/c", "Apagado pedido desde MovilDeep (DeepSeek Chat)."]
+    elif action == "cancel":
+        args = ["shutdown", "/a"]
+    else:
+        return False, f"acción desconocida: {action}"
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"No se pudo ejecutar shutdown: {e}"
+    if r.returncode != 0:
+        return False, f"shutdown devolvió {r.returncode}: {(r.stderr or r.stdout).strip()}"
+    return True, ""
 
 
 def fit_geometry(geo, bounds, minw=860, minh=520):
@@ -98,6 +123,8 @@ class App:
         self._server = None
         self._server_key = None
         self.remote_srv = None
+        self.power_fn = system_power     # reemplazable en los tests
+        self._shutdown_win = None
         self._live = {"content": "", "rlen": 0}      # el paso en curso, para quien mira por el celular
         self._pending_confirm = None
         self._confirm_seq = 0
@@ -1055,6 +1082,61 @@ class App:
         else:
             p["done"](res)
         return True, ""
+
+    def remote_power(self, action):
+        if action not in ("shutdown", "suspend"):
+            return False, "Acción desconocida: se puede apagar («shutdown») o suspender («suspend»)."
+        if self.busy:
+            return False, BUSY_POWER_NOTE
+        if action == "suspend":
+            self.chat.note("MovilDeep pidió suspender la PC: se suspende en 3 segundos.")
+            self.root.after(SUSPEND_DELAY_MS, self._suspend_now)
+            return True, ""
+        ok, msg = self.power_fn("shutdown")
+        if not ok:
+            return False, msg
+        self.chat.note(f"MovilDeep pidió apagar la PC: se apaga en {SHUTDOWN_DELAY} segundos.")
+        self._shutdown_countdown()
+        return True, ""
+
+    def _suspend_now(self):
+        ok, msg = self.power_fn("suspend")
+        if not ok:
+            self.chat.note(msg, error=True)
+
+    def _shutdown_countdown(self):
+        """Ventana siempre encima con la cuenta regresiva y «Cancelar apagado» (shutdown /a)."""
+        if self._shutdown_win is not None:
+            self._shutdown_win.destroy()
+        w = self._shutdown_win = tk.Toplevel(self.root)
+        w.title(TITULO)
+        w.attributes("-topmost", True)
+        w.resizable(False, False)
+        lbl = ttk.Label(w, padding=(20, 16), font=("Segoe UI", 12))
+        lbl.pack()
+        left = [SHUTDOWN_DELAY]
+
+        def close():
+            if self._shutdown_win is w:
+                self._shutdown_win = None
+            w.destroy()
+
+        def cancel():
+            ok, msg = self.power_fn("cancel")
+            self.chat.note("Apagado cancelado." if ok else msg, error=not ok)
+            close()
+
+        def tick():
+            if self._shutdown_win is not w:
+                return
+            lbl.config(text=f"MovilDeep pidió apagar la PC.\nSe apaga en {left[0]} s.")
+            if left[0] <= 0:
+                return
+            left[0] -= 1
+            w.after(1000, tick)
+        ttk.Button(w, text="Cancelar apagado", command=cancel).pack(pady=(0, 16))
+        w.protocol("WM_DELETE_WINDOW", cancel)     # cerrar la ventana también cancela: nada se apaga sin verlo
+        tick()
 
     def start_remote(self):
         """Enciende el servidor. Devuelve (ok, mensaje). Genera el token la primera vez."""

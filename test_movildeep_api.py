@@ -213,6 +213,8 @@ cfg["remote_port"] = 0
 root = tk.Tk()
 guion = Guion()
 app = dc.App(root, cfg, stream_factory=guion, interactive=False)
+energia = []        # lo que se le pidió a la energía de la PC: simulada, nunca se apaga ni se suspende de verdad
+app.power_fn = lambda accion: (energia.append(accion), (True, ""))[1]
 
 
 def pump(cond=lambda: False, t=8.0):
@@ -359,6 +361,10 @@ c, r = http("POST", "/api/session/switch", {"id": nueva})
 check("cambiar de sesión trabajando: 409 con el aviso de la PC", c == 409 and r["msg"] == dc.BUSY_SESSION_NOTE, (c, r))
 c, r = http("POST", "/api/model", {"id": modelo})
 check("cambiar de modelo trabajando: 409", c == 409 and "trabajando" in r["msg"], (c, r))
+c, r = http("POST", "/api/power", {"action": "shutdown"})
+check("apagar trabajando: 409 con el aviso de la PC", c == 409 and r["msg"] == dc.BUSY_POWER_NOTE, (c, r))
+c, r = http("POST", "/api/power", {"action": "suspend"})
+check("suspender trabajando: 409 con el aviso de la PC", c == 409 and r["msg"] == dc.BUSY_POWER_NOTE, (c, r))
 check("CONTROL: ni la sesión ni el modelo cambiaron", app.sess.id == sid_antes and app.sess.model == modelo_antes)
 http("POST", "/api/cancel", {})
 terminar()
@@ -429,6 +435,38 @@ if exe and cv2 is not None:
     c, u = subir("pantalla.png", imagen_con_texto(os.path.join(tmp, "p.png"), "Texto de la captura 77"))
     check("imagen por HTTP: kind ocr y el aviso dice que no se guardó", c == 200 and u["kind"] == "ocr" and "no se guardó" in u["note"], (c, u))
 app.sess.workspace = ws
+
+# apagar y suspender (con la energía simulada)
+pump(t=3.5)
+check("CONTROL: los rechazos (trabajando) no llamaron a la energía", energia == [], energia)
+c, r = http("POST", "/api/power", {"action": "reboot"})
+check("acción desconocida: 409 y no llama a nada", c == 409 and energia == [], (c, r, energia))
+c, r = http("POST", "/api/power", {"action": "shutdown"}, token="malo")
+check("apagar sin token válido: 401 y no llama a nada", c == 401 and energia == [], (c, energia))
+c, r = http("POST", "/api/power", {"action": "shutdown"})
+check("apagar: 200 y llama una sola vez a «shutdown»", c == 200 and energia == ["shutdown"], (c, r, energia))
+win = app._shutdown_win
+check("apagar: ventana siempre encima con la cuenta regresiva",
+      win is not None and bool(win.attributes("-topmost"))
+      and any("Se apaga en" in str(x.cget("text")) for x in win.winfo_children() if isinstance(x, dc.ttk.Label)))
+boton = [x for x in win.winfo_children() if isinstance(x, dc.ttk.Button)]
+check("apagar: la ventana ofrece «Cancelar apagado»", len(boton) == 1 and boton[0].cget("text") == "Cancelar apagado")
+boton[0].invoke()
+root.update()
+check("Cancelar apagado: llama a «cancel» y cierra la ventana", energia == ["shutdown", "cancel"] and app._shutdown_win is None,
+      energia)
+app.power_fn = lambda accion: (energia.append(accion), (False, "shutdown devolvió 1190: ya hay un apagado"))[1]
+c, r = http("POST", "/api/power", {"action": "shutdown"})
+check("apagar con error de Windows: 409 con el motivo y sin ventana",
+      c == 409 and "1190" in r["msg"] and app._shutdown_win is None, (c, r))
+app.power_fn = lambda accion: (energia.append(accion), (True, ""))[1]
+del energia[:]
+c, r = http("POST", "/api/power", {"action": "suspend"})
+check("suspender: 200 y todavía no suspendió (la respuesta sale primero)", c == 200 and energia == [], (c, r, energia))
+pump(t=2.0)
+check("suspender: a los 2 s todavía no", energia == [], energia)
+check("suspender: a los 3 s llama una sola vez a «suspend»", pump(lambda: energia == ["suspend"], 3) and energia == ["suspend"],
+      energia)
 
 # el QR en la ventana «Remoto»
 dlg = dialogs.RemoteDialog(app)
