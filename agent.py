@@ -7,6 +7,7 @@ Invariante que este módulo mantiene siempre: en `messages`, todo mensaje del as
 exactamente un mensaje 'tool' por cada llamada, aunque se cancele o falle a la mitad. La API rechaza lo contrario.
 """
 import json
+import re
 
 import agent_tools as at
 
@@ -27,6 +28,12 @@ PLACEHOLDER_ERROR = ("ERROR: this call was not run: an argument is only the plac
 BROKEN_ARGS = "{}"
 REPEAT_WARN = 3
 REPEAT_ABORT = 5
+# El mismo error con argumentos distintos: el contador de arriba no lo ve, porque cada llamada es otra. Caso real (sesión
+# TEMPORALES, 2026-09-28): el modelo local recibió «outside the workspace folder» y «BLOCKED» una y otra vez probando
+# rutas y comillas nuevas, sin leer nunca el error. Se compara el error sin lo que va entre comillas ni los números.
+SAME_ERROR_WARN = 3
+SAME_ERROR_ABORT = 8
+ERROR_PREFIXES = ("ERROR", "BLOCKED", "DENIED")
 DEFAULT_MAX_STEPS = 60
 # Modelos locales: el presupuesto de historial sale de la ventana de contexto real, no de un número fijo de caracteres.
 # Caracteres por token de arranque (a propósito bajo: sobra lugar), recalibrado con los prompt_tokens de cada respuesta.
@@ -63,6 +70,14 @@ def _shrink_args(raw):
         return raw
     return json.dumps({k: (ARGS_OMITTED if isinstance(x, str) and len(x) > LONG_ARG_CHARS else x) for k, x in v.items()},
                       ensure_ascii=False)
+
+
+def error_kind(result):
+    """El error sin sus datos (rutas, comandos, números): dos errores del mismo tipo dan lo mismo. None si no es error."""
+    if not result.startswith(ERROR_PREFIXES):
+        return None
+    s = re.sub(r"'[^'\n]*'|\"[^\"\n]*\"|`[^`\n]*`|«[^»\n]*»", "…", result.split("\n", 1)[0])
+    return re.sub(r"\d+", "#", s)[:300]
 
 
 def is_placeholder_call(args):
@@ -226,7 +241,7 @@ class Agent:
     def run(self, messages, emit, cancel):
         """Avanza hasta la respuesta final. Devuelve 'done', 'cancelled', 'max_steps' o 'loop'. Los errores de red
         (ApiError) se propagan: los mensajes quedan bien formados hasta el último paso completo."""
-        seen = {}
+        seen, errors = {}, {}
         for step in range(1, self.max_steps + 1):
             if cancel.is_set():
                 return "cancelled"
@@ -305,12 +320,26 @@ class Agent:
                             result = PLACEHOLDER_ERROR
                         else:
                             result = self.toolbox.execute(name, args, cancel)
-                            if name in STATE_CHANGING and not result.startswith(("ERROR", "BLOCKED", "DENIED")):
+                            if name in STATE_CHANGING and not result.startswith(ERROR_PREFIXES):
                                 seen.clear()
+                                errors.clear()
+                    kind = None if aborted or cancel.is_set() else error_kind(result)
+                    if kind:
+                        errors[kind] = errors.get(kind, 0) + 1
+                        if errors[kind] >= SAME_ERROR_ABORT:
+                            aborted = True
+                            result += ("\n\nStopped: you got this same error %d times. Explain to the user what "
+                                       "you were trying to do and what the error says." % errors[kind])
+                        elif errors[kind] >= SAME_ERROR_WARN:
+                            result += ("\n\nNOTE: you got this same error %d times now, with different arguments. "
+                                       "Variations of the same call will not fix it. Read the error message above and do what "
+                                       "it says; if it is a restriction of DeepSeekChat (blocked, outside the folder, denied), "
+                                       "it will not change: explain it to the user instead of trying again." % errors[kind])
                 messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
                 emit("tool_result", c["id"], name, result)
             if aborted:
-                emit("notice", "Se detectó un bucle (el modelo repitió la misma llamada); se detuvo el agente.")
+                emit("notice", "Se detectó un bucle (el modelo repitió la misma llamada o recibió el mismo error una y "
+                               "otra vez); se detuvo el agente.")
                 return "loop"
         emit("notice", f"Se alcanzó el máximo de {self.max_steps} pasos sin una respuesta final. Apretá «Continuar» (o escribí «seguí») para que siga.")
         return "max_steps"

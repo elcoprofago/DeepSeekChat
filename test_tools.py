@@ -1,6 +1,7 @@
 """Prueba de agent_tools contra un árbol de juguete. Los archivos CONTROL deben sobrevivir intactos."""
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -80,7 +81,28 @@ check("un junction hacia afuera no sirve de puerta", r.startswith("ERROR") and "
 r = ex("write_file", {"path": "sub/puerta/nuevo.txt", "content": "x"})
 check("no escribe a través del junction", r.startswith("ERROR") and not os.path.exists(os.path.join(outside, "nuevo.txt")), r)
 check(".git es intocable para leer", ex("read_file", {"path": ".git/config"}).startswith("ERROR"))
-check(".git es intocable para escribir", ex("write_file", {"path": ".git/config", "content": "x"}).startswith("ERROR") and sha(os.path.join(ws, ".git", "config")) == h_git)
+r = ex("read_file", {"path": "..\\afuera\\secreto.txt"})
+check("el error de «fuera de la carpeta» dice cuál es la carpeta", tb.root in r, r)
+
+# caso real (sesión TEMPORALES, 2026-09-28): con la raíz de una unidad como carpeta, list_dir . andaba y todo lo demás
+# decía «outside the workspace folder». Se prueba sobre la unidad del temporal, escribiendo solo dentro de él.
+drive = os.path.splitdrive(base)[0] + "\\"
+rel_base = os.path.relpath(base, drive)
+tb_raiz = at.ToolBox(drive, confirm=confirm_si, approval="all", backup_dir=os.path.join(base, "respaldos_raiz"))
+r = tb_raiz.execute("write_file", {"path": rel_base + "/raiz/nuevo.txt", "content": "desde la raiz\n"})
+check("carpeta = raíz de la unidad: write_file con ruta relativa", r.startswith("OK") and
+      open(os.path.join(base, "raiz", "nuevo.txt")).read() == "desde la raiz\n", r)
+r = tb_raiz.execute("read_file", {"path": os.path.join(base, "raiz", "nuevo.txt")})
+check("carpeta = raíz de la unidad: read_file con ruta absoluta", "desde la raiz" in r, r)
+r = tb_raiz.execute("list_dir", {"path": rel_base + "/raiz"})
+check("carpeta = raíz de la unidad: list_dir de una subcarpeta", "nuevo.txt" in r, r)
+r = tb_raiz.execute("delete_path", {"path": rel_base + "/raiz/nuevo.txt"})
+check("carpeta = raíz de la unidad: delete_path", r.startswith("OK") and not os.path.exists(os.path.join(base, "raiz", "nuevo.txt")), r)
+otra = next((d + ":\\" for d in "ZYXWVUTSRQPONMLKJIHGFED" if d + ":\\" != drive.upper() and not os.path.exists(d + ":\\")), None)
+check("CONTROL: con la raíz de una unidad, otra unidad sigue fuera", otra is None or
+      tb_raiz.execute("read_file", {"path": otra + "x.txt"}).startswith("ERROR: path"))
+check("CONTROL: con la raíz de una unidad, .git en la raíz sigue prohibido", tb_raiz.execute("read_file", {"path": ".git/config"}).startswith("ERROR"))
+check(".git es intocable para escribir",ex("write_file", {"path": ".git/config", "content": "x"}).startswith("ERROR") and sha(os.path.join(ws, ".git", "config")) == h_git)
 
 # ---- lectura
 r = ex("list_dir", {})
@@ -236,6 +258,61 @@ ok = ["python --version", "python -m pytest -q", "npm run build", "npm install",
       "git rm --cached calc.py", "git rm -r --cached tools/diagnostico", "git rm --cached -f a.py b.py"]
 bloqueados = [c for c in ok if at.check_command(c)]
 check("control: comandos de trabajo normal NO se bloquean", not bloqueados, [(c, at.check_command(c)) for c in bloqueados])
+
+# caso real (sesión TEMPORALES, 2026-09-28): texto que nunca se ejecuta se bloqueaba como «borrar archivos»
+texto = [r'echo patrones protegidos del sistema > notas.txt',
+         r'findstr /I /N /C:"Get-FileHash" /C:"Remove-Item" /C:"Test-Path" Scripts\LimpiezaSegura.ps1',
+         r'type x.txt | findstr "del sistema"',
+         r"""powershell -NoProfile -Command "Set-Content -Path 'E2.txt' -Value '# patrones protegidos del sistema'; 'ok E2'" """,
+         r"""powershell -NoProfile -Command "$t=@('# Reglas del repositorio','no se quita, no se renombra','Remove-Item $f -Force'); $t | Set-Content -Path x.ps1" """,
+         r"""powershell -c "Write-Host 'no se borra nada del sistema'" """, r"""powershell -c "Write-Host \"texto del sistema\"" """,
+         r"""powershell -c "Get-ChildItem . # listar los archivos del proyecto" """, r'@echo off & echo rm -rf no se usa',
+         "powershell -c \"@'\nhola del sistema\nRemove-Item nada\n'@ | Set-Content x.txt\"", r'cmd /c "echo del sistema"',
+         r'type "Informe del mes.txt"', r'python informe.py --titulo "Resumen del dia" > salida.txt', r'copy "Acta del 5.docx" respaldo',
+         r'dir /b "C:\Users\x\Fotos del viaje"', r'if exist "Notas del dia.txt" type "Notas del dia.txt"',
+         r'gh issue create --title "Error del filtro" --body-file x.md']
+bloqueados = [c for c in texto if at.check_command(c)]
+check("texto que no se ejecuta (echo, findstr, comentarios y datos de PowerShell, nombres con «del») NO se bloquea",
+      not bloqueados, [(c, at.check_command(c)) for c in bloqueados])
+# CONTROL: sacar el texto no puede abrir una puerta al borrado real
+borrados = [r'echo x & del CONTROL.txt', r"echo it's & del CONTROL.txt", r'echo "a & b" & del CONTROL.txt',
+            r"""powershell -c "'x'; Remove-Item CONTROL.txt" """, r"""powershell -c "Write-Host 'a'; Remove-Item CONTROL.txt" """,
+            r"""powershell -c "& 'Remove-Item' CONTROL.txt" """, r"""powershell -c "Write-Host \"$(Remove-Item CONTROL.txt)\"" """,
+            r"""powershell -c "$x = Remove-Item CONTROL.txt" """, r"""cmd /c "echo a & del CONTROL.txt" """,
+            r'findstr x a.txt & del CONTROL.txt', r'powershell -c "Write-Host x" & del CONTROL.txt',
+            r"""powershell -c "<# comentario #> Remove-Item CONTROL.txt" """, r"""powershell -c "Set-Content x.txt 'a'; Remove-Item CONTROL.txt" """,
+            r'echo ok | powershell -c "Remove-Item x"', r'powershell -c "Remove-Item CONTROL.txt" > log.txt',
+            "powershell -c \"@'\nhola\n'@ | Set-Content x.txt; Remove-Item CONTROL.txt\"", r'powershell -c Remove-Item CONTROL.txt',
+            r'powershell -Command "Get-ChildItem | Remove-Item"', r"""powershell -c "Write-Host 'a' # c" & del CONTROL.txt""",
+            r'find . -name "*.tmp" -exec rm {} ;', r'echo x && rd /s /q sub', r"""powershell -c "Get-ChildItem 'C:\x' | ri -r" """,
+            r'@del CONTROL.txt', r'(del CONTROL.txt)', r'npx rimraf dist', r'for %f in (*.tmp) do del %f', r'if exist x.txt del x.txt',
+            r'if not exist a.txt del b.txt', r'if errorlevel 1 rd /s /q build', r'forfiles /m *.tmp /c "cmd /c del @path"',
+            r'wsl rm -rf /mnt/c/x', r'bash -c "cd x && rm -rf y"', r'ssh host "rm -rf /tmp/x"', r'dir /b | xargs rm',
+            r"for /f %i in ('dir /b *.tmp') do @del %i", r'call del x', r'schtasks /create /tn x /tr "del x"', r'powershell Remove-Item x',
+            r'powershell -NoProfile del x', r'if "%a%"=="1" del x', r'IF EXIST x ERASE x', r'rd build', r'rmdir build', r'del/q x']
+sin_bloquear = [c for c in borrados if not at.check_command(c)]
+check("CONTROL: los borrados reales, también mezclados con texto, siguen bloqueados", not sin_bloquear, sin_bloquear)
+r = ex("run_command", {"command": "exit /b -196608"})
+check("código de salida negativo: se muestra también con signo y en hex", r.startswith("[exit code 4294770688 = -196608 = 0xFFFD0000]"), r)
+r = ex("run_command", {"command": "exit /b 3"})
+check("CONTROL: un código chico se muestra igual que antes", r.startswith("[exit code 3]"), r)
+# caso medido (2026-09-28): con el usr\bin de Git antes de System32, `find` era el de Unix y recorría todo C:
+falso = os.path.join(base, "unix_bin")
+os.makedirs(falso)
+shutil.copy2(os.path.join(os.environ["SystemRoot"], "System32", "hostname.exe"), os.path.join(falso, "find.exe"))
+mk(os.path.join(ws, "tres.txt"), b"a\r\nb\r\nc\r\n")
+path_antes = os.environ["PATH"]
+os.environ["PATH"] = falso + os.pathsep + path_antes
+try:
+    r = ex("run_command", {"command": 'find /c /v "" tres.txt'})
+finally:
+    os.environ["PATH"] = path_antes
+check("run_command: un find que tapa al de Windows no se usa", r.startswith("[exit code 0]") and r.rstrip().endswith(": 3"), r)
+sys32 = os.path.join(os.environ["SystemRoot"], "System32")
+check("CONTROL: si nada antes de System32 tapa find ni sort, el PATH queda igual",
+      at.cmd_path(sys32 + os.pathsep + falso) == sys32 + os.pathsep + falso and at.cmd_path(base + os.pathsep + sys32) == base + os.pathsep + sys32)
+check("la vista de código no demora con un script largo", (lambda t0: (at.check_command(
+    "powershell -c \"$t=@(" + ",".join(["'linea del script'"] * 3000) + ")\""), time.time() - t0)[1] < 2)(time.time()))
 
 # ---- borrado: delete_path pide permiso, deja copia y se puede deshacer
 bk_d = os.path.join(base, "respaldos_borrado")

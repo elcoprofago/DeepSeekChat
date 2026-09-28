@@ -398,7 +398,33 @@ check("cada respuesta del agente lleva _model con quien la escribió", len(resp)
 check("EFECTO: _model no viaja al modelo en el pedido siguiente", all("_model" not in x for x in f.seen[-1][0]), f.seen[-1][0])
 st, m, ev, f = run([fin])
 check("CONTROL: sin label no se inventa un _model", all("_model" not in x for x in m), m)
-check("CONTROL final: CONTROL.txt intacto", open(os.path.join(ws, "CONTROL.txt")).read() == "intacto\n")
+# ---- el mismo error con argumentos distintos (sesión TEMPORALES, 2026-09-28: rutas nuevas contra «outside the workspace»)
+afuera = [[("tool_calls", [call("o%d" % i, "write_file", {"path": "C:\\otra%d\\x.txt" % i, "content": "x"})]), ("finish", "tool_calls")]
+          for i in range(12)]
+st, m, ev, f = run(afuera + [fin])
+res = [x["content"] for x in m if x["role"] == "tool"]
+check("mismo error, rutas distintas: desde el 3.º el resultado le dice que no pruebe variaciones",
+      "NOTE" not in res[1] and "Variations of the same call will not fix it" in res[2], res[:3])
+check("mismo error, rutas distintas: al 8.º se corta como bucle", st == "loop" and len(res) == agent.SAME_ERROR_ABORT
+      and "Stopped" in res[-1] and agent.validate(m) == [], (st, len(res)))
+check("CONTROL: ninguna de esas escrituras salió de la carpeta", not any(os.path.exists("C:\\otra%d" % i) for i in range(12)))
+# CONTROL: errores distintos no se suman entre sí, y un cambio que sale bien reinicia la cuenta
+mixto = []
+for i in range(6):
+    mixto.append([("tool_calls", [call("r%d" % i, "read_file", {"path": "no_existe%d.txt" % i})]), ("finish", "tool_calls")])
+    mixto.append([("tool_calls", [call("w%d" % i, "write_file", {"path": "ok%d.txt" % i, "content": "x"})]), ("finish", "tool_calls")])
+st, m, ev, f = run(mixto + [fin])
+res = [x["content"] for x in m if x["role"] == "tool"]
+check("CONTROL: con un cambio exitoso entre medio, el mismo error no acumula aviso ni corte",
+      st == "done" and not any("NOTE" in r or "Stopped" in r for r in res), [r[:60] for r in res])
+st, m, ev, f = run([[("tool_calls", [call("e1", "read_file", {"path": "no1.txt"})]), ("finish", "tool_calls")],
+                    [("tool_calls", [call("e2", "hackear", {})]), ("finish", "tool_calls")],
+                    [("tool_calls", [call("e3", "write_file", {"path": "C:\\otraz\\x", "content": "x"})]), ("finish", "tool_calls")], fin])
+check("CONTROL: tres errores de tipos distintos no disparan el aviso", st == "done" and not any("NOTE" in x.get("content", "") for x in m), m)
+check("error_kind: el mismo error con rutas y números distintos da lo mismo",
+      agent.error_kind("ERROR: path 'a/b' is outside (C:\\w) 12") == agent.error_kind("ERROR: path 'c' is outside (C:\\w) 7")
+      and agent.error_kind("OK: wrote 'a'") is None and agent.error_kind("[exit code 1]") is None)
+check("CONTROL final: CONTROL.txt intacto",open(os.path.join(ws, "CONTROL.txt")).read() == "intacto\n")
 
 print("\nFALLAS:", fallas if fallas else "ninguna")
 raise SystemExit(1 if fallas else 0)

@@ -41,8 +41,8 @@ class ToolError(Exception):
 # ---------------------------------------------------------------- filtro de comandos
 
 _BLOCK = [
-    (r"\b(rm|rmdir|rd|del|erase)\b", "borrar archivos o carpetas"),
-    (r"\bremove-item\b|\bri\s+-r", "borrar archivos o carpetas (PowerShell)"),
+    (r"\bgit\s+rm\b|\brimraf\b", "borrar archivos o carpetas"),
+    (r"\bri\s+-r", "borrar archivos o carpetas (PowerShell)"),
     (r"\bformat(\.com)?\s+[a-z]:", "formatear un volumen"),
     (r"\b(diskpart|bcdedit|bootrec|bcdboot|vssadmin|cipher\s+/w|takeown|icacls|sfc|dism)\b", "tocar disco, arranque o permisos del sistema"),
     (r"\breg(\.exe)?\s+(add|delete|import|load|unload|restore|copy|save)\b", "escribir en el registro"),
@@ -62,6 +62,32 @@ _BLOCK = [
     (r"^\s*start\b", "abre un programa aparte"),
 ]
 _BLOCK_RE = [(re.compile(p, re.I), why) for p, why in _BLOCK]
+
+# Borrar: `del` es además una palabra del español («Informe del mes.txt», «Resumen del día»). En un comando de cmd solo
+# cuenta en posición de comando: al principio, tras un separador, `(`, comillas, `do`, `else`, `call`, `/c`, `-exec`,
+# `xargs`, `sudo`, `=` o un `if exist X`/`if errorlevel N`/`if a==b`. Si lo que se ejecuta es un intérprete (PowerShell,
+# bash, wsl, ssh...), dentro de él se busca en cualquier lugar, como antes: su sintaxis no se sigue desde acá.
+_DEL_WORDS = r"(?P<w>rm|rmdir|rd|del|erase|remove-item|ri)(?:\.exe)?(?=$|[\s;&|)\"'/])"
+_ARG = r"""(?:"[^"]*"|[^\s"]+)"""
+_DEL_AT_CMD = re.compile(
+    r"""(?:^|[&|;(\n{="'`]|\b(?:do|else|then|call|sudo)\s|/[ck]\s|-exec\s|\bxargs(?:\s+-\S+)*\s|"""
+    r"""\bif\s+(?:/i\s+)?(?:not\s+)?(?:exist\s+""" + _ARG + r"""|errorlevel\s+\d+|defined\s+\S+|""" + _ARG + r"""\s*==\s*""" + _ARG +
+    r"""|""" + _ARG + r"""\s+(?:equ|neq|lss|leq|gtr|geq)\s+""" + _ARG + r""")\s)\s*@?""" + _DEL_WORDS, re.I)
+_DEL_ANYWHERE = re.compile(r"\b" + _DEL_WORDS, re.I)
+_SHELLS = {"powershell", "pwsh", "cmd", "bash", "sh", "wsl", "ssh", "busybox", "env", "runas", "sudo", "git-bash", "zsh"}
+
+
+def _deletes(code):
+    """El motivo si la vista de código (ver _code_view) borra con del/rm/rd/erase/Remove-Item, o None."""
+    for seg, _ in _cmd_segments(code):
+        s = seg.lstrip(" \t@(")
+        first = re.match(r"""["']?([^\s"'/<>]+)""", s)
+        name = os.path.basename(first.group(1)).lower() if first else ""
+        name = name[:-4] if name.endswith(".exe") else name
+        m = (_DEL_ANYWHERE if name in _SHELLS else _DEL_AT_CMD).search(s)
+        if m:
+            return "borrar archivos o carpetas" + (" (PowerShell)" if m.group("w").lower() in ("remove-item", "ri") else "")
+    return None
 
 
 # El mensaje de un commit es texto, no un comando: «uso del proceso» no es un `del`. Solo se le quita eso; cualquier
@@ -90,6 +116,167 @@ def _git_index_risk(command):
 _PIPE_MASKS_EXIT = re.compile(r"\|\s*(more|findstr|find|tee|head|tail|sort|select-string)\b", re.I)
 
 
+def cmd_path(path):
+    """El PATH para run_command, que promete cmd de Windows: si una carpeta anterior a System32 tapa find o sort (el
+    usr\\bin de Git, cuando la app se abre desde Git Bash), System32 pasa adelante. Medido el 2026-09-28: con ese PATH,
+    `find /c "archivo"` era el find de Unix recorriendo todo C: hasta el timeout de 60 s. Si nada lo tapa, no cambia."""
+    sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    parts = [p for p in path.split(os.pathsep) if p]
+    norm = [os.path.normcase(os.path.normpath(p)) for p in parts]
+    i = norm.index(os.path.normcase(sys32)) if os.path.normcase(sys32) in norm else len(parts)
+    if any(os.path.isfile(os.path.join(p, exe)) for p in parts[:i] for exe in ("find.exe", "sort.exe")):
+        return os.pathsep.join([sys32] + parts[:i] + parts[i + 1:])
+    return path
+
+
+def exit_code_text(code):
+    """Windows devuelve el código como entero sin signo de 32 bits. Caso real (sesión TEMPORALES, 2026-09-28): el
+    modelo recibió «4294770688» y no supo qué era; como -196608 / 0xFFFD0000 se puede reconocer y buscar."""
+    if code is not None and code >= 0x80000000:
+        return f"{code} = {code - 0x100000000} = 0x{code:08X}"
+    return str(code)
+
+
+# ---------------------------------------------------------------- vista de código: el texto que nunca se ejecuta, fuera
+# Caso real (sesión TEMPORALES, 2026-09-28): «patrones protegidos del sistema» dentro de un comentario, o `findstr
+# /C:"Remove-Item" x.ps1` para buscar en un script, se bloqueaban como «borrar archivos». El filtro revisa ahora solo lo
+# que se ejecuta: se quitan los argumentos de echo/findstr y los textos de PowerShell que son datos (comentarios, y
+# literales asignados a una variable, al principio de una instrucción o pasados a Set-Content, Write-Host...). Cualquier
+# otro texto entre comillas se sigue revisando, porque puede ser un comando (`cmd /c "del x"`, `& 'Remove-Item' x`).
+# Es una red contra errores, no contra un modelo que quiera esquivarla: un .bat escrito con write_file ya la esquiva.
+
+_CMD_TEXT_ONLY = {"echo", "rem", "title", "findstr"}      # sus argumentos son texto. `find` no: el de Unix tiene -delete y -exec
+_PS_DATA_CMDS = {"set-content", "add-content", "out-file", "write-host", "write-output", "write-warning", "write-error",
+                 "write-verbose", "write", "echo", "select-string", "sls", "sc", "ac"}
+_PS_START = re.compile(r"""^\s*["']?((?:powershell|pwsh)(?:\.exe)?)["']?\s""", re.I)
+_PS_CMD_ARG = re.compile(r"""\s-(?:c|command)(?:\s+|$)""", re.I)
+
+
+def _cmd_segments(command):
+    """[(segmento, separador que lo sigue)] como parte cmd.exe: solo las comillas dobles protegen, y `^` escapa.
+    Las simples NO son comillas para cmd (`echo it's & del x` ejecuta el del)."""
+    out, cur, q, i = [], [], False, 0
+    while i < len(command):
+        ch = command[i]
+        if ch == "^" and not q and i + 1 < len(command):
+            cur.append(command[i:i + 2])
+            i += 2
+            continue
+        if ch == '"':
+            q = not q
+        elif not q and ch in "&|\n" and not (ch == "&" and cur and cur[-1].endswith(">")):
+            sep = command[i:i + 2] if command[i:i + 2] in ("&&", "||") else ch
+            out.append(("".join(cur), sep))
+            cur = []
+            i += len(sep)
+            continue
+        cur.append(ch)
+        i += 1
+    out.append(("".join(cur), ""))
+    return out
+
+
+def _ps_code(script):
+    """El script de PowerShell sin los textos que son datos (ver arriba). Lo que no entiende lo deja como está."""
+    out, i, n = [], 0, len(script)
+    head, assign, prev = None, False, ""       # primera palabra de la instrucción, si ya hubo un `=`, último carácter útil
+    while i < n:
+        ch = script[i]
+        if ch in ";\n|{}":
+            head, assign, prev = None, False, ch
+            out.append(ch)
+            i += 1
+            continue
+        if script.startswith("<#", i):
+            j = script.find("#>", i + 2)
+            i = n if j < 0 else j + 2
+            out.append(" ")
+            continue
+        if ch == "#" and script[i - 1:i] in ("", " ", "\t", ";", "(", "{", "\n"):
+            j = script.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        here = re.compile(r"@(['\"])[ \t]*\r?\n").match(script, i) if ch == "@" else None
+        if ch in "'\"" or here:
+            if here:
+                qc = here.group(1)
+                end = re.compile(r"\r?\n" + qc + "@").search(script, here.end())
+                j = n if end is None else end.end()
+                body = script[i:j]
+            else:
+                qc, j = ch, i + 1
+                while j < n:
+                    if script[j] == "`" and qc == '"':
+                        j += 2
+                        continue
+                    if script[j] == qc:
+                        if j + 1 < n and script[j + 1] == qc:      # '' o "" dentro del texto
+                            j += 2
+                            continue
+                        break
+                    j += 1
+                j = min(j + 1, n)
+                body = script[i:j]
+            called = prev in ("&", ".")                             # & 'Remove-Item' x: el texto ES el comando
+            data = not head or assign or head in _PS_DATA_CMDS
+            if data and not called and not (qc == '"' and "$(" in body):
+                out.append(" '' ")
+            else:
+                out.append(body)
+            if head is None:
+                head = ""                                           # la instrucción empezó con un texto
+            prev = qc
+            i = j
+            continue
+        if ch == "=" and head and head.startswith("$") and script[i - 1:i] not in ("-", "!", "<", ">") and script[i + 1:i + 2] != "=":
+            assign = True
+        if head is None and not ch.isspace() and ch not in "(@":
+            m = re.match(r"[^\s;|{}()='\"]+", script[i:])
+            if m:
+                head = m.group(0).lower()
+                out.append(m.group(0))
+                prev = m.group(0)[-1]
+                i += m.end()
+                continue
+        out.append(ch)
+        if not ch.isspace():
+            prev = ch
+        i += 1
+    return "".join(out)
+
+
+def _code_view(command, depth=0):
+    """El comando con el texto que nunca se ejecuta quitado (ver arriba). Conserva los separadores."""
+    parts = []
+    for seg, sep in _cmd_segments(command):
+        s = seg.lstrip(" \t@(")
+        pre = seg[:len(seg) - len(s)]
+        word = re.match(r"""[^\s"'/<>]+""", s)
+        name = word.group(0).lower() if word else ""
+        name = name[:-4] if name.endswith(".exe") else name
+        if name in _CMD_TEXT_ONLY or re.match(r"echo[.:(]", name):
+            seg = pre + name
+        elif name == "cmd" and depth < 3:
+            m = re.search(r"\s/[ck]\s+(.*)$", s, re.I | re.S)
+            if m:
+                inner = m.group(1).strip()
+                if len(inner) >= 2 and inner[0] == inner[-1] == '"':
+                    inner = inner[1:-1]
+                seg = pre + s[:m.start(1)] + _code_view(inner, depth + 1)
+        elif _PS_START.match(s):
+            m = _PS_CMD_ARG.search(s)
+            if m:
+                script, rest = s[m.end():], ""
+                if script.startswith('"'):
+                    # el script entre comillas termina en la primera " sin \ delante; lo que sigue (`> log.txt`, otros
+                    # argumentos) se revisa entero, sin quitarle nada
+                    k = re.search(r'(?<!\\)"', script[1:])
+                    script, rest = (script[1:k.start() + 1], script[k.start() + 2:]) if k else (script[1:], "")
+                seg = pre + s[:m.end()] + _ps_code(script.replace('\\"', '"')) + " " + rest
+        parts.append(seg + sep)
+    return "".join(parts)
+
+
 def check_command(command):
     """Devuelve el motivo si el comando no debe ejecutarse nunca, o None si puede seguir al pedido de permiso."""
     if not command or not command.strip():
@@ -97,6 +284,10 @@ def check_command(command):
     if re.search(r"\bgit\b.*\bcommit\b", command, re.I):
         command = _COMMIT_MSG.sub(" ", command)
     command = _GIT_RM_CACHED.sub("git untrack", command)
+    command = _code_view(command)
+    why = _deletes(command)
+    if why:
+        return why
     for rx, why in _BLOCK_RE:
         if rx.search(command):
             return why
@@ -236,6 +427,14 @@ def _is_link(p):
     return os.path.islink(p) or bool(getattr(st, "st_file_attributes", 0) & 0x400)
 
 
+def _inside(p, root):
+    """p es root o está debajo. La raíz de una unidad (`C:\\`) ya termina en separador: sumarle otro hacía que nada
+    quedara adentro (caso real, sesión TEMPORALES 2026-09-28: con la carpeta C:\\ se listaba todo y no se podía
+    escribir ni leer nada)."""
+    p, root = os.path.normcase(p), os.path.normcase(root)
+    return p == root or p.startswith(root if root.endswith(os.sep) else root + os.sep)
+
+
 def _tree_stats(p):
     """(archivos, bytes, hay_enlaces) de un archivo o carpeta, sin entrar nunca en un enlace."""
     if _is_link(p):
@@ -344,10 +543,9 @@ class ToolBox:
         rel = (rel or ".").strip().strip('"')
         p = rel if os.path.isabs(rel) else os.path.join(self.root, rel)
         p = os.path.realpath(p)
-        inside = os.path.normcase(p) == os.path.normcase(self.root) or \
-            os.path.normcase(p).startswith(os.path.normcase(self.root) + os.sep)
-        if not inside:
-            raise ToolError(f"path '{rel}' is outside the workspace folder")
+        if not _inside(p, self.root):
+            raise ToolError(f"path '{rel}' is outside the workspace folder ({self.root}). Use a path relative to it, "
+                            f"like 'folder/file.txt'; nothing outside it can be read or written")
         parts = os.path.relpath(p, self.root).split(os.sep)
         if parts[0] == ".git" or parts[0] == ".dschat-backup":
             raise ToolError(f"'{parts[0]}' is off-limits")
@@ -643,6 +841,7 @@ class ToolBox:
         # Los programas de Python y Node escriben UTF-8 si se les pide; los comandos propios de cmd (dir, type)
         # escriben en la página OEM. Se intenta UTF-8 estricto y, si no es válido, OEM.
         env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        env["PATH"] = cmd_path(env.get("PATH", ""))
         if self.extra_path:
             # al final: si la máquina ya tiene su propio Python o Node, ese gana; los del pendrive son el respaldo
             env["PATH"] = os.pathsep.join([env.get("PATH", "")] + [p for p in self.extra_path if os.path.isdir(p)])
@@ -673,7 +872,7 @@ class ToolBox:
         t.join(2)
         self._proc = None
         out = decode_output(b"".join(chunks)).replace("\r\n", "\n")
-        status = f"[killed: {killed}]" if killed else f"[exit code {proc.returncode}]"
+        status = f"[killed: {killed}]" if killed else f"[exit code {exit_code_text(proc.returncode)}]"
         if not killed and _PIPE_MASKS_EXIT.search(command):
             status += (" (WARNING: the command has a pipe, so this is the exit code of its LAST part, not of the program you ran; "
                        "a failure may be hidden. Run it again without the pipe to know the real result.)")
@@ -742,13 +941,15 @@ SPECS = [
         {"path": {"type": "string"}, "old": {"type": "string", "description": "Exact text to replace"},
          "new": {"type": "string", "description": "Replacement text"},
          "replace_all": {"type": "boolean", "description": "Replace every occurrence"}}, ["path", "old", "new"]),
-    _fn("write_file", "Create a new file or fully overwrite one. Prefer edit_file for small changes to existing files.",
+    _fn("write_file", "Create a new file or fully overwrite one, with its whole content in one call (any language, any "
+        "quotes). Prefer edit_file for small changes to existing files.",
         {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
     _fn("delete_path", "Delete a file or a folder (with everything in it) inside the workspace. The user is asked first and can undo it. "
         "Only delete what the user asked you to delete. Symlinks and junctions are never deleted.",
         {"path": {"type": "string", "description": "File or folder to delete"}}, ["path"]),
-    _fn("run_command", "Run a shell command (Windows cmd) in the workspace root, e.g. tests or a build. No interactive programs. "
-        "Destructive commands are blocked (use delete_path to delete files).",
+    _fn("run_command", "Run a command in Windows cmd.exe (not bash: no cat, ls, rm, grep) in the workspace root, e.g. tests "
+        "or a build. No interactive programs. Not for writing files: use write_file. Destructive commands are blocked "
+        "(use delete_path to delete files).",
         {"command": {"type": "string"}, "timeout": {"type": "integer", "description": "Seconds, default 60, max 600"}}, ["command"]),
 ]
 

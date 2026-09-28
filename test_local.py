@@ -143,6 +143,13 @@ check("reasoning_for: perfil por defecto y elección de la barra",
 check("modelos sin interruptor: None aunque la barra traiga algo (no se pasa --reasoning)",
       lm.reasoning_for("Qwen3-4B-Thinking-2507.gguf", "sin razonar") is None and lm.reasoning_for("DeepSeek-R1-0528-Qwen3-8B.gguf") is None
       and "--reasoning" not in lm.server_args("Qwen3-4B-Thinking-2507.gguf", 16384, None))
+q35 = lm.server_args(r"E:\Models\Qwen3.5-9B-Q4_K_M.gguf", 20480, lm.reasoning_for("Qwen3.5-9B-Q4_K_M.gguf"))
+check("Qwen3.5 sin razonar: muestreo de la tarjeta (instruct)", q35[q35.index("--temp") + 1] == "0.7" and q35[q35.index("--top-p") + 1] == "0.8"
+      and q35[q35.index("--top-k") + 1] == "20" and q35[q35.index("--min-p") + 1] == "0", q35)
+q35r = lm.server_args(r"E:\Models\Qwen3.5-9B-Q4_K_M.gguf", 20480, "on")
+check("Qwen3.5 razonando: muestreo de la tarjeta (thinking, código)", q35r[q35r.index("--temp") + 1] == "0.6" and q35r[q35r.index("--top-p") + 1] == "0.95", q35r)
+check("CONTROL: los perfiles sin muestreo medido siguen con los de llama.cpp",
+      not any(a in ("--temp", "--top-p", "--top-k", "--min-p") for a in a32 + glm + q36), a32 + glm + q36)
 check("un esfuerzo de DeepSeek guardado en la sesión no cambia el razonamiento local", lm.reasoning_for("Qwen3.5-9B.gguf", "high") == "off")
 
 MODEL = r"E:\Models\Nvidia\Qwen2.5-0.5B-Instruct-Q3_K_L.gguf"

@@ -135,13 +135,20 @@ def scan_models(dirs, max_depth=3):
 #              (Qwen3-4B a 32K: 77,6 tok/s con q8 contra 26 sin). En GLM (MoE) hunde el proceso del prompt
 #              (31,7 contra 191 tok/s) y en Gemma 4 no hace falta (73 tok/s hasta 128K sin él).
 #   moe:       lotes de 2048: GLM-4.7-Flash procesa el prompt a 451 tok/s en vez de 191.
+#   sampling:  argumentos de muestreo según --reasoning ("on"/"off"). Sin esta clave, los de llama.cpp (temp 0,8,
+#              top-k 40, top-p 0,95, min-p 0,05), que no son los que recomienda cada fabricante.
 # El primer patrón que aparece en el nombre del archivo (en minúsculas) gana.
+# Qwen3.5: los de la tarjeta del modelo (huggingface.co/Qwen/Qwen3.5-9B, leída el 28/9/2026). Sin razonar: «instruct,
+# general tasks». Razonando: «thinking, precise coding tasks» (sin razonar se midió; razonando solo se copió de la tarjeta).
+QWEN35_INSTRUCT = ["--temp", "0.7", "--top-p", "0.8", "--top-k", "20", "--min-p", "0", "--presence-penalty", "1.5"]
+QWEN35_THINKING_CODE = ["--temp", "0.6", "--top-p", "0.95", "--top-k", "20", "--min-p", "0"]
 PROFILES = (
     # MoE: 31 tok/s hasta 64K; 12/12 sin razonar en 151 s, 11/12 razonando en 1724 s. El q8 no cambia nada.
     ("qwen3.6-35b-a3b", {"reasoning": "off", "kv_q8": False, "moe": True}),
     ("glm-4.7-flash", {"reasoning": "off", "kv_q8": False, "moe": True}),
     ("gemma-4", {"reasoning": "on", "kv_q8": False, "moe": False}),
-    ("qwen3.5", {"reasoning": "off", "kv_q8": True, "moe": False}),   # con razonamiento se enlaza en bucles de 8000 tokens
+    ("qwen3.5", {"reasoning": "off", "kv_q8": True, "moe": False,     # con razonamiento se enlaza en bucles de 8000 tokens
+                 "sampling": {"off": QWEN35_INSTRUCT, "on": QWEN35_THINKING_CODE}}),
     ("thinking", {"reasoning": None, "kv_q8": True, "moe": False}),   # Qwen3-*-Thinking: piensa siempre
     ("deepseek-r1", {"reasoning": None, "kv_q8": True, "moe": False}),
 )
@@ -178,6 +185,7 @@ def server_args(model_path, ctx, reasoning=None):
         args += ["-b", "2048", "-ub", "2048"]
     if reasoning in ("on", "off"):
         args += ["--reasoning", reasoning]
+    args += prof.get("sampling", {}).get(reasoning, [])
     return args
 
 

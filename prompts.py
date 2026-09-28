@@ -8,6 +8,13 @@ outside it. Keep changes focused. After changing code, run the project's checks 
 for permission first; if one is denied, do not try to get around it: say what you could not do and why it mattered.
 When you finish, say briefly what you did and what you actually verified. Do not claim something works unless you ran it.
 Working rules:
+- run_command runs Windows cmd.exe, not bash: cat, ls, pwd, wc, grep and rm do not exist there. To look at files use
+  read_file, list_dir and search. In cmd only double quotes quote, and `$` is an ordinary character: do not escape it.
+- Write the content of a file only with write_file or edit_file. Never build a file with echo, Set-Content or `>` line by
+  line: the quoting breaks it silently.
+- The "OK" of a tool only means it ran. Before you say a file was created or changed correctly, read it back or run it.
+- When a tool returns an error, read the message and do what it says. Do not retry the same thing with small variations
+  (another path, other quotes): the same error will come back.
 - Never pipe a command's output through more, findstr, tee or head: in cmd the pipe hides the real exit code. Run the command
   alone and read the "[exit code N]" line; if the output is long, redirect it to a file and read the file.
 - Report test counts only as the test runner prints them (for example "86 passed"); never count dots or lines yourself.
