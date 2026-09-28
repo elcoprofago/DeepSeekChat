@@ -3,6 +3,14 @@
 # el lanzador), tiene que subir VERSION en version.py. Sin esto, dos pendrives con codigo distinto mostrarian la
 # misma version y el numero del titulo seria una afirmacion falsa.
 # Activado con: git config core.hooksPath hooks
+#
+# Aviso (no bloquea): Actualizar.bat de las otras PC solo ve versiones publicadas como release de GitHub, y eso git no
+# lo puede comprobar desde un commit.
+nueva=$(git diff --cached -U0 -- version.py | sed -n 's/^+VERSION = "\(.*\)"/\1/p')
+if [ -n "$nueva" ]; then
+    echo "AVISO: VERSION pasa a $nueva. Las otras PC no la ven hasta publicar la release, despues del push:" >&2
+    echo "    git push && gh release create v$nueva --target master --title $nueva --notes \"...\"" >&2
+fi
 app=$(git diff --cached --name-only --diff-filter=ACMRD | grep -E '^([^/]+\.pyw?|asterisc\.ico|b-(env|stop)\.png|launcher/.*)$' | grep -vE '^(test_[^/]*|version\.py)$')
 [ -z "$app" ] && exit 0
 if git diff --cached -U0 -- version.py | grep -qE '^\+VERSION = '; then
