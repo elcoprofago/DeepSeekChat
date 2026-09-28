@@ -11,19 +11,39 @@ Seguridad, en orden de importancia:
     No puede: cambiar el modo de permisos, la carpeta de trabajo, la configuración ni la key. El filtro de comandos
     peligrosos y los permisos que elija la PC siguen rigiendo igual.
   * HTTP simple, sin cifrado: en una Wi-Fi ajena el token podría verse. Para eso, Tailscale (cifra todo) en vez de abrir el puerto.
+
+Dos clientes: la página web de abajo (protocolo 1, sin cambios) y la app MovilDeep (protocolo 2: /api/info, sesiones,
+modelos, subida de adjuntos y el contador de ejecuciones run.seq). Si cambia lo que MovilDeep espera de la API, hay que
+subir PROTOCOL: la app lo compara al conectar y no usa una API que no conoce.
 """
+import base64
+import binascii
 import hmac
+import ipaddress
 import json
+import os
 import secrets
+import shutil
 import socket
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import dsapi
+import ocr
+import version
+
 DEFAULT_PORT = 8765
+PROTOCOL = 2
 MAX_BODY = 64 * 1024
+MAX_UPLOAD_BODY = 21 * 1024 * 1024          # 15 MB en base64 más el JSON; solo para /api/upload
+MAX_UPLOAD_FILE = 15 * 1024 * 1024
 MAX_TEXT = 20000
+UPLOAD_DIR = "movildeep-adjuntos"
+QR_PREFIX = "movildeep:"
+TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
 
 
 def new_token():
@@ -42,14 +62,165 @@ def lan_ip():
         s.close()
 
 
+def local_ipv4s():
+    """Las IPv4 de las interfaces de esta PC, sin mandar paquetes (Windows las resuelve a partir del propio nombre)."""
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return []
+    out = []
+    for info in infos:
+        ip = info[4][0]
+        if ip not in out:
+            out.append(ip)
+    return out
+
+
+def tailscale_ip(addrs=None):
+    """La IPv4 de Tailscale de esta PC (la primera local en 100.64.0.0/10), o "" si no hay. No depende del comando
+    tailscale ni de que esté en el PATH. addrs: para tests."""
+    for ip in (local_ipv4s() if addrs is None else addrs):
+        try:
+            if ipaddress.ip_address(ip) in TAILSCALE_NET:
+                return ip
+        except ValueError:
+            continue
+    return ""
+
+
+def qr_payload(lan, ts, port, token):
+    """Lo que lleva el QR de emparejamiento de MovilDeep: primero la IP local y, si hay, la de Tailscale."""
+    hosts = [lan] + ([ts] if ts and ts != lan else [])
+    return QR_PREFIX + json.dumps({"v": 1, "hosts": hosts, "port": port, "token": token}, separators=(",", ":"))
+
+
+# ---------------------------------------------------------------- adjuntos subidos desde el celular
+
+class UploadError(Exception):
+    def __init__(self, msg, status=422):
+        super().__init__(msg)
+        self.status = status
+
+
+_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+
+
+def safe_name(name):
+    """El nombre base de un archivo subido, válido en Windows: sin carpetas, sin '..', sin caracteres prohibidos."""
+    name = str(name or "").replace("\\", "/").split("/")[-1]
+    name = "".join("_" if c in '<>:"|?*' or ord(c) < 32 else c for c in name).strip().rstrip(". ")
+    if not name.strip("."):
+        name = "archivo"
+    if name.split(".")[0].upper() in _RESERVED:
+        name = "_" + name
+    if len(name) > 150:
+        stem, ext = os.path.splitext(name)
+        ext = ext[:20]
+        name = stem[:150 - len(ext)] + ext
+    return name
+
+
+def human_size(n):
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB".replace(".", ",")
+    return f"{n // 1024} KB" if n >= 1024 else f"{n} bytes"
+
+
+def save_unique(workspace, name, data):
+    """Guarda data en <workspace>\\movildeep-adjuntos\\<name> sin pisar nada: si ya existe, «name (2).ext», etc.
+    Escribe a un temporal en la misma carpeta y lo renombra al final (en Windows os.rename no pisa): una subida
+    cortada no deja un archivo a medias con el nombre final. Devuelve la ruta."""
+    folder = os.path.abspath(os.path.join(workspace, UPLOAD_DIR))
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".subiendo-", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        stem, ext = os.path.splitext(name)
+        for i in range(1, 10000):
+            dest = os.path.join(folder, name if i == 1 else f"{stem} ({i}){ext}")
+            if os.path.dirname(os.path.abspath(dest)) != folder:
+                raise UploadError("nombre de archivo inválido")
+            if os.path.lexists(dest):
+                continue
+            try:
+                os.rename(tmp, dest)
+                return dest
+            except FileExistsError:
+                continue
+        raise UploadError(f"Hay demasiados archivos llamados {name} en {UPLOAD_DIR}")
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _looks_text(data):
+    if b"\x00" in data[:8192]:                  # el mismo criterio que dsapi.read_text_file
+        return False
+    for enc in ("utf-8-sig", "cp1252"):
+        try:
+            data.decode(enc)
+            return True
+        except UnicodeDecodeError:
+            continue
+    return False
+
+
+def prepare_upload(name, data, workspace, tesseract):
+    """Procesa un archivo subido. Devuelve {name, kind, note, att_name, text}: text (o None) es lo que se incrusta en el
+    mensaje como adjunto de texto att_name; note (o "") es el aviso para el agente. UploadError si se rechaza."""
+    name = safe_name(name)
+    if len(data) > MAX_UPLOAD_FILE:
+        raise UploadError(f"{name} pesa {human_size(len(data))}; el máximo por archivo es 15 MB", 413)
+    ws = workspace if workspace and os.path.isdir(workspace) else ""
+    tmpdir = tempfile.mkdtemp(prefix="movildeep_")
+    try:
+        tmp = os.path.join(tmpdir, name)
+        with open(tmp, "wb") as f:
+            f.write(data)
+        extra = ""
+        if ocr.is_image(name):
+            if tesseract:
+                try:
+                    body = ocr.run(tesseract, tmp) or "OCR: no se encontró texto"
+                except (ocr.OcrTimeout, ocr.OcrError, ocr.OcrUnavailable) as e:
+                    body = str(e)
+                if ws:
+                    note = f"La imagen original {name} se guardó en {save_unique(ws, name, data)}"
+                else:
+                    note = f"La imagen original {name} no se guardó: la sesión no tiene carpeta de trabajo"
+                return {"name": name, "kind": "ocr", "note": note, "att_name": name + ".ocr.txt",
+                        "text": f"Texto extraído por OCR de la imagen {name}\n\n{body}"}
+            extra = " (OCR no disponible en esta PC)"
+        elif _looks_text(data):
+            try:
+                text = dsapi.read_text_file(tmp)
+            except dsapi.AttachError as e:
+                raise UploadError(str(e), 413) from None
+            return {"name": name, "kind": "text", "note": "", "att_name": name, "text": text}
+        if not ws:
+            raise UploadError(f"No se puede recibir {name}: no es texto y la sesión no tiene carpeta de trabajo donde "
+                              f"guardarlo{extra}")
+        path = save_unique(ws, name, data)
+        return {"name": name, "kind": "stored", "att_name": None, "text": None,
+                "note": f"Se subió {name} ({human_size(len(data))}) a {path}; no es texto, no se incluye su contenido"
+                        + extra}
+    except OSError as e:
+        raise UploadError(f"No se pudo guardar {name}: {e}", 500) from None
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def fingerprint(m):
     """Huella barata de un mensaje: sirve para que el celular note que el historial cambió por debajo (p. ej. se retiró un mensaje)."""
     return f"{m.get('role')}:{len(str(m.get('content') or ''))}:{len(m.get('tool_calls') or [])}"
 
 
 class RemoteServer:
-    """bridge debe tener: state(n, fp, sid) -> dict, send(text) -> (ok, msg), cancel() -> (ok, msg),
-    continue_run() -> (ok, msg), confirm(cid, allow) -> (ok, msg). Todas se llaman desde hilos del servidor."""
+    """bridge debe tener: state(n, fp, sid) -> dict, send(text, attachments) -> (ok, msg), cancel() -> (ok, msg),
+    continue_run() -> (ok, msg), confirm(cid, allow) -> (ok, msg), sessions() -> list, switch_session(sid) -> (ok, msg),
+    new_session() -> (ok, msg), models() -> list, set_model(mid) -> (ok, msg), upload(name, data) -> dict (o
+    UploadError). Todas se llaman desde hilos del servidor."""
 
     def __init__(self, bridge, token, port=DEFAULT_PORT, host="0.0.0.0"):
         if not token or len(token) < 16:
@@ -78,6 +249,10 @@ class RemoteServer:
 
     def link(self):
         return f"http://{lan_ip()}:{self.port}/#{self.token}"
+
+    def qr_payload(self):
+        """Contenido del QR de emparejamiento de MovilDeep (IP local y, si hay, la de Tailscale)."""
+        return qr_payload(lan_ip(), tailscale_ip(), self.port, self.token)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -112,19 +287,25 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(401, {"error": "token inválido"})
         return False
 
-    def _body(self):
+    def _body(self, limit=MAX_BODY):
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             n = -1
-        if n < 0 or n > MAX_BODY:
-            self._json(413, {"error": "pedido demasiado grande"})
+        if n < 0 or n > limit:
+            self.close_connection = True        # el cuerpo queda sin leer: la conexión no se puede reutilizar
+            self._json(413, {"error": "pedido demasiado grande" if limit == MAX_BODY
+                             else "el archivo supera el máximo de 15 MB"})
             return None
         if "application/json" not in (self.headers.get("Content-Type") or ""):
             self._json(415, {"error": "se espera application/json"})     # así un formulario de otro sitio no puede pegarle
             return None
+        raw = self.rfile.read(n)
+        if len(raw) < n:                        # la subida se cortó a la mitad
+            self.close_connection = True
+            return None
         try:
-            d = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+            d = json.loads(raw.decode("utf-8") or "{}")
             return d if isinstance(d, dict) else {}
         except (ValueError, UnicodeDecodeError):
             self._json(400, {"error": "JSON inválido"})
@@ -148,27 +329,52 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, self.server_ref.bridge.state(n, (q.get("fp") or [""])[0], (q.get("sid") or [""])[0]))
             except Exception as e:              # noqa: BLE001
                 self._json(503, {"error": f"la app no respondió: {e}"})
+        elif u.path == "/api/info":
+            if self._authorized():
+                self._json(200, {"app": "DeepSeekChat", "version": version.VERSION, "protocol": PROTOCOL})
+        elif u.path in ("/api/sessions", "/api/models"):
+            if not self._authorized():
+                return
+            b = self.server_ref.bridge
+            try:
+                self._json(200, b.sessions() if u.path == "/api/sessions" else b.models())
+            except Exception as e:              # noqa: BLE001
+                self._json(503, {"error": f"la app no respondió: {e}"})
         else:
             self._json(404, {"error": "no existe"})
 
     def do_POST(self):
         u = urlparse(self.path)
-        if u.path not in ("/api/send", "/api/cancel", "/api/continue", "/api/confirm"):
+        if u.path not in ("/api/send", "/api/cancel", "/api/continue", "/api/confirm", "/api/session/switch",
+                          "/api/session/new", "/api/model", "/api/upload"):
             self._json(404, {"error": "no existe"})
             return
         if not self._authorized():
             return
-        d = self._body()
+        d = self._body(MAX_UPLOAD_BODY if u.path == "/api/upload" else MAX_BODY)
         if d is None:
             return
         b = self.server_ref.bridge
+        if u.path == "/api/upload":
+            self._upload(b, d)
+            return
         try:
             if u.path == "/api/send":
                 text = str(d.get("text") or "").strip()
-                if not text:
+                att = d.get("attachments") or []
+                if not isinstance(att, list) or not all(isinstance(x, str) for x in att):
+                    self._json(400, {"error": "attachments debe ser una lista de ids"})
+                    return
+                if not text and not att:
                     self._json(400, {"error": "mensaje vacío"})
                     return
-                ok, msg = b.send(text[:MAX_TEXT])
+                ok, msg = b.send(text[:MAX_TEXT], att)
+            elif u.path == "/api/session/switch":
+                ok, msg = b.switch_session(str(d.get("id") or ""))
+            elif u.path == "/api/session/new":
+                ok, msg = b.new_session()
+            elif u.path == "/api/model":
+                ok, msg = b.set_model(str(d.get("id") or ""))
             elif u.path == "/api/cancel":
                 ok, msg = b.cancel()
             elif u.path == "/api/continue":
@@ -180,6 +386,23 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json(200 if ok else 409, {"ok": ok, "msg": msg})
 
+    def _upload(self, b, d):
+        name = str(d.get("name") or "").strip()
+        if not name:
+            self._json(400, {"error": "falta el nombre del archivo"})
+            return
+        try:
+            data = base64.b64decode(str(d.get("data_base64") or ""), validate=True)
+        except (binascii.Error, ValueError):
+            self._json(400, {"error": "data_base64 inválido"})
+            return
+        try:
+            self._json(200, b.upload(name, data))
+        except UploadError as e:
+            self._json(e.status, {"error": str(e)})
+        except Exception as e:                  # noqa: BLE001
+            self._json(503, {"error": f"la app no respondió: {e}"})
+
 
 class AppBridge:
     """Une el servidor con la ventana. Todo corre en el hilo de tkinter (app.call_ui), así nunca se lee la interfaz
@@ -189,6 +412,8 @@ class AppBridge:
 
     def __init__(self, app):
         self.app = app
+        self.uploads = {}               # id -> lo que preparó prepare_upload, hasta que un mensaje lo use
+        self._lock = threading.Lock()
 
     @staticmethod
     def _items(m):
@@ -233,13 +458,51 @@ class AppBridge:
             "busy": a.busy, "status": a.remote_status(), "title": s.title or "Sesión nueva",
             "live": a._live, "can_continue": a._can_continue,
             "confirm": None if p is None else {"id": p["id"], "kind": p["kind"], "title": p["title"][:300], "detail": p["detail"][:6000]},
+            "run": {"seq": a._run_seq, "outcome": a._run_outcome, "msg": a._run_msg},
         }
 
     def state(self, n, fp, sid):
         return self.app.call_ui(lambda: self._state(n, fp, sid))
 
-    def send(self, text):
-        return self.app.call_ui(lambda: self.app.remote_send(text))
+    def send(self, text, attachments=()):
+        with self._lock:
+            items = [self.uploads.get(i) for i in attachments]
+        if any(it is None for it in items):
+            return False, ("Un adjunto ya no está en la PC (¿se reinició DeepSeekChat?). Quitalo y volvé a "
+                           "adjuntarlo.")
+        ok, msg = self.app.call_ui(lambda: self.app.remote_send(text, items))
+        if ok:
+            with self._lock:
+                for i in attachments:
+                    self.uploads.pop(i, None)
+        return ok, msg
+
+    def sessions(self):
+        return self.app.call_ui(self.app.remote_sessions)
+
+    def switch_session(self, sid):
+        return self.app.call_ui(lambda: self.app.remote_switch_session(sid))
+
+    def new_session(self):
+        return self.app.call_ui(self.app.remote_new_session)
+
+    def models(self):
+        return self.app.call_ui(self.app.remote_model_list)
+
+    def set_model(self, mid):
+        return self.app.call_ui(lambda: self.app.remote_set_model(mid))
+
+    def upload(self, name, data):
+        """Corre en el hilo del servidor (el OCR puede tardar hasta un minuto y call_ui espera 8 s): de la ventana
+        solo lee la carpeta de trabajo."""
+        a = self.app
+        ws = a.call_ui(lambda: a.sess.workspace or "")
+        exe = ocr.find_tesseract(a.cfg.root if a.cfg.portable else None) if ocr.is_image(safe_name(name)) else None
+        item = prepare_upload(name, data, ws, exe)
+        uid = secrets.token_urlsafe(9)
+        with self._lock:
+            self.uploads[uid] = item
+        return {"id": uid, "name": item["name"], "kind": item["kind"], "note": item["note"]}
 
     def cancel(self):
         return self.app.call_ui(self.app.remote_cancel)

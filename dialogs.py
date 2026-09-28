@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 import agent_tools as at
 import dsapi
 import localmodels
+import qrcodegen
 import version
 
 TITULO = "DeepSeek Chat"
@@ -109,6 +110,21 @@ class ConfirmDialog:
 
 # ---------------------------------------------------------------- acceso remoto desde el celular
 
+def qr_photo(master, text, scale=4, quiet=4):
+    """El QR de text como tk.PhotoImage (módulos negros sobre blanco, con su zona de silencio)."""
+    m = qrcodegen.encode(text)
+    n = len(m) + 2 * quiet
+    blank = "{" + " ".join(["#ffffff"] * n) + "}"
+    rows = [blank] * quiet
+    for r in m:
+        cells = ["#ffffff"] * quiet + ["#000000" if c else "#ffffff" for c in r] + ["#ffffff"] * quiet
+        rows.append("{" + " ".join(cells) + "}")
+    rows += [blank] * quiet
+    img = tk.PhotoImage(master=master, width=n, height=n)
+    img.put(" ".join(rows))
+    return img.zoom(scale)
+
+
 class RemoteDialog:
     def __init__(self, app):
         self.app = app
@@ -134,12 +150,19 @@ class RemoteDialog:
         self.btn_regen.pack(side="left", padx=8)
         self.msg = ttk.Label(f, text="", wraplength=520, justify="left")
         self.msg.pack(anchor="w", pady=(8, 0))
+        self.qr_img = None
+        self.qr_lbl = tk.Label(f, bd=0, bg=t["bg"])     # el QR de MovilDeep; vacío con el servidor apagado
+        self.qr_lbl.pack(anchor="center", pady=(8, 0))
         ttk.Label(f, style="Muted.TLabel", wraplength=520, justify="left", text=(
             "Desde el celular se puede ver la conversación, mandar instrucciones, detener al agente y aceptar o denegar los "
             "permisos que pida. No se puede cambiar el modo de permisos, la carpeta ni la configuración: eso sigue en esta PC.\n\n"
             "Ojo: quien tenga el enlace puede hacer trabajar al agente en esta PC. La conexión es HTTP simple (sin cifrar); "
             "no lo uses en redes Wi-Fi ajenas ni lo reenvíes. Si se filtró, «Generar token nuevo» lo invalida. "
-            "Windows puede preguntar si permitís a Python recibir conexiones: hay que aceptar en «red privada».")).pack(anchor="w", pady=(10, 0))
+            "Windows puede preguntar si permitís a Python recibir conexiones: hay que aceptar en «red privada»; aceptá "
+            "también para la red de Tailscale.\n\n"
+            "App MovilDeep: con el acceso encendido, escaneá el QR desde la app para emparejar el celular. El QR lleva la IP "
+            "de esta PC en la Wi-Fi y, si Tailscale está activo, también la de Tailscale: fuera de casa MovilDeep se conecta "
+            "por Tailscale, que cifra todo (no hace falta abrir ningún puerto del router).")).pack(anchor="w", pady=(10, 0))
         ttk.Button(f, text="Cerrar", command=w.destroy).pack(anchor="e", pady=(10, 0))
         _place(w, app)
         self.refresh()
@@ -150,6 +173,8 @@ class RemoteDialog:
         state = "normal" if srv is not None else "disabled"
         self.btn_copy.configure(state=state)
         self.btn_regen.configure(state=state)
+        self.qr_img = qr_photo(self.win, srv.qr_payload()) if srv is not None else None
+        self.qr_lbl.configure(image=self.qr_img if self.qr_img is not None else "")
 
     def _say(self, text, error=False):
         self.msg.configure(text=text, style="Err.TLabel" if error else "Ok.TLabel")

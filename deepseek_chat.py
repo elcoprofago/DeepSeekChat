@@ -37,6 +37,8 @@ SIN_EFFORT = "(por defecto)"
 APPROVALS = {"ask": "Preguntar todo", "edits": "Editar sin preguntar", "all": "Todo sin preguntar"}
 MUTATING = {"write_file", "edit_file", "delete_path", "run_command"}
 CONTINUE_TEXT = "Seguí con lo que estabas haciendo, desde donde quedaste."
+BUSY_SESSION_NOTE = "Hay un agente trabajando. Esperá a que termine o presioná «Detener» antes de cambiar de sesión."
+BUSY_MODEL_NOTE = "Hay un agente trabajando. Esperá a que termine o presioná «Detener» antes de cambiar de modelo."
 REMOTE_BUDGET = 600000
 LOCAL_TIMEOUT = 900
 miles = chatview.miles
@@ -100,6 +102,9 @@ class App:
         self._pending_confirm = None
         self._confirm_seq = 0
         self._can_continue = False
+        # cómo terminó la última ejecución, para MovilDeep: seq sube en 1 con cada fin (así un fin entre dos consultas no se pierde)
+        self._run_seq, self._run_outcome, self._run_msg = 0, "", ""
+        self._last_notice = ""
         self.last_usage = None
         self.balance_text = "—"
         self._suppress_select = False
@@ -694,7 +699,7 @@ class App:
             self.root.after_idle(lambda: setattr(self, "_suppress_select", False))
 
     def _busy_note(self):
-        self.chat.note("Hay un agente trabajando. Esperá a que termine o presioná «Detener» antes de cambiar de sesión.")
+        self.chat.note(BUSY_SESSION_NOTE)
 
     def new_session(self):
         if self.busy:
@@ -957,13 +962,70 @@ class App:
             return txt or "Trabajando…"
         return "Listo"
 
-    def remote_send(self, text):
+    @staticmethod
+    def _with_uploads(text, uploads):
+        """El texto con los avisos de los adjuntos del celular, y los pares (nombre, contenido) a incrustar."""
+        notes = [u["note"] for u in uploads if u.get("note")]
+        extra = [(u["att_name"], u["text"]) for u in uploads if u.get("text") is not None]
+        return "\n\n".join([t for t in [text] + notes if t]), extra
+
+    def remote_send(self, text, uploads=()):
         if self.busy:
             return False, "El agente está trabajando: esperá o detenelo."
         e = self._entry_for(self.sess.model)
         if e["kind"] == "remote" and not self.cfg.api_key:
             return False, "Falta la API key en la PC (o está bloqueada con contraseña)."
-        self.send(text, keep_draft=True)         # keep_draft: no toca lo que la persona tenga escrito en la PC
+        full_text, extra = self._with_uploads(text, uploads)
+        try:
+            dsapi.build_message(full_text, [], extra)     # el tope de 2 MB entre todos: se avisa al celular, no a la PC
+        except dsapi.AttachError as err:
+            return False, str(err)
+        self.send(text, keep_draft=True, uploads=uploads)  # keep_draft: no toca lo que la persona tenga escrito en la PC
+        return True, ""
+
+    def remote_sessions(self):
+        cur = self.sess
+        out = [{"id": cur.id, "title": cur.display_title, "updated": cur.updated, "current": True}]
+        for s in self.store.list():
+            if s.id != cur.id:
+                out.append({"id": s.id, "title": s.display_title, "updated": s.updated, "current": False})
+        return out
+
+    def remote_switch_session(self, sid):
+        if self.busy:
+            return False, BUSY_SESSION_NOTE
+        if sid == self.sess.id:
+            return True, ""
+        self.switch_session(sid)
+        if self.sess.id != sid:
+            return False, "No se pudo abrir esa sesión (el archivo falta o estaba dañado)."
+        return True, ""
+
+    def remote_new_session(self):
+        if self.busy:
+            return False, BUSY_SESSION_NOTE
+        if not self.sess.messages:
+            return True, "La sesión abierta ya está vacía: se sigue en esa."
+        self.new_session()
+        return True, ""
+
+    def remote_model_list(self):
+        entries = self._all_entries()
+        cur = self._entry_for(self.sess.model) if self.sess.model else None
+        if cur and cur["id"] not in [e["id"] for e in entries]:
+            entries.insert(0, cur)
+        return [{"id": e["id"], "name": self._display(e), "kind": e["kind"], "current": bool(cur and e["id"] == cur["id"])}
+                for e in entries]
+
+    def remote_set_model(self, mid):
+        if self.busy:
+            return False, BUSY_MODEL_NOTE
+        names = {m["id"]: m["name"] for m in self.remote_model_list()}
+        if mid not in names:
+            return False, "Ese modelo ya no está en la lista de la PC."
+        self._refresh_model_widgets()
+        self.model_var.set(names[mid])
+        self.on_model_change()                   # la misma lógica que el selector de la PC
         return True, ""
 
     def remote_cancel(self):
@@ -1079,15 +1141,16 @@ class App:
         """Retoma la tarea tras el tope de pasos. Lo que el usuario tenga escrito o adjunto queda intacto."""
         self.send(CONTINUE_TEXT, keep_draft=True)
 
-    def send(self, text=None, keep_draft=False):
+    def send(self, text=None, keep_draft=False, uploads=()):
         """Manda el texto del campo de entrada (o el indicado, para tests) junto con los adjuntos.
-        Con keep_draft=True no toca lo que haya en el campo ni los adjuntos (así funciona «Continuar»)."""
+        Con keep_draft=True no toca lo que haya en el campo ni los adjuntos (así funciona «Continuar»).
+        uploads: adjuntos subidos desde el celular (lo que arma remote.prepare_upload)."""
         if self.busy:
             return
         if text is None:
             text = self.input.get("1.0", "end-1c")
         text = text.strip()
-        if not text and not self.attachments:
+        if not text and not self.attachments and not uploads:
             return
         s = self.sess
         entry = self._entry_for(s.model)
@@ -1100,14 +1163,16 @@ class App:
                     self.open_settings()
             return
         files = [] if keep_draft else list(self.attachments)
+        full_text, extra = self._with_uploads(text, uploads)
         try:
-            content = dsapi.build_message(text, files)
+            content = dsapi.build_message(full_text, files, extra)
         except (dsapi.AttachError, OSError) as e:
             self.warn(str(e))
             return
         n0 = len(s.messages)
         s.messages.append({"role": "user", "content": content})
-        self.chat.user(text, files)
+        self.chat.user(full_text, files + [n for n, _ in extra])
+        self._last_notice = ""
         if not keep_draft:
             self.input.delete("1.0", "end")
             self.attachments = []
@@ -1299,6 +1364,7 @@ class App:
             self._set_state("Pensando…")
         elif kind == "notice":
             c.note("• " + a[0])
+            self._last_notice = a[0]
 
     def _update_status_keep_busy(self):
         txt = self.state_lbl.cget("text")
@@ -1326,6 +1392,7 @@ class App:
             c.note("✖ " + error, error=True)
         elif outcome == "cancelled":
             c.note("■ Interrumpido.")
+        self._record_run(outcome, error)
         self._set_busy(False)
         # también si «Continuar» mismo falló (red caída): el botón vuelve a estar para reintentar
         self._show_continue((outcome == "max_steps" and not error) or bool(restore and restore[0] == CONTINUE_TEXT))
@@ -1334,6 +1401,20 @@ class App:
         self._retitle()
         if self._entry_for(self.sess.model)["kind"] == "remote":
             self.refresh_balance()
+
+    def _record_run(self, outcome, error):
+        if error:
+            outcome, msg = "error", error
+        elif outcome == "done":
+            last = next((m for m in reversed(self.sess.messages) if m.get("role") == "assistant"), {})
+            msg = str(last.get("content") or "").strip()
+        elif outcome == "cancelled":
+            msg = "Interrumpido."
+        else:                                   # max_steps / loop: el aviso que dio el agente
+            msg = self._last_notice
+        self._run_seq += 1
+        self._run_outcome = outcome or "error"
+        self._run_msg = msg[:300]
 
     # ------------------------------------------------------------ deshacer
 

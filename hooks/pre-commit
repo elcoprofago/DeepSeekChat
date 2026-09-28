@@ -6,6 +6,11 @@
 #
 # Aviso (no bloquea): Actualizar.bat de las otras PC solo ve versiones publicadas como release de GitHub, y eso git no
 # lo puede comprobar desde un commit.
+# Aviso (no bloquea): remote.py es la API que usa la app MovilDeep (otro repo). Si cambia de forma incompatible hay que
+# subir PROTOCOL; el control efectivo es que MovilDeep compara protocol en tiempo de ejecucion, no este aviso.
+if git diff --cached --name-only --diff-filter=ACMRD | grep -qx 'remote\.py'; then
+    echo "AVISO: el commit toca remote.py: si cambio la API, revisar si hay que subir protocol y acompanar en MovilDeep." >&2
+fi
 nueva=$(git diff --cached -U0 -- version.py | sed -n 's/^+VERSION = "\(.*\)"/\1/p')
 if [ -n "$nueva" ]; then
     echo "AVISO: VERSION pasa a $nueva. Las otras PC no la ven hasta publicar la release, despues del push:" >&2

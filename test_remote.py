@@ -72,7 +72,7 @@ class Falso:
     def state(self, n, fp, sid):
         return {"n": n, "sid": sid}
 
-    def send(self, text):
+    def send(self, text, attachments=()):
         self.enviados.append(text)
         return True, ""
 

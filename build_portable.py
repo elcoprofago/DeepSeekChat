@@ -1,11 +1,12 @@
 """Arma la carpeta portable de DeepSeek Chat (para copiar a un pendrive).
 
-Uso:   python build_portable.py [--out RUTA] [--llama-bin RUTA] [--sin-ucrt] [--sin-exe] [--sin-verificar]
+Uso:   python build_portable.py [--out RUTA] [--llama-bin RUTA] [--tesseract RUTA] [--sin-ucrt] [--sin-exe] [--sin-verificar]
 
 Resultado (por defecto en dist\\DeepSeekChat):
     app\\       los .py de la aplicación (sin tests ni este script), su ícono y las imágenes de botones
     runtime\\   un Python recortado y propio (tkinter incluido), sin pip ni site-packages
     bin\\       llama-server.exe y sus DLL, para los modelos locales
+    bin\\tesseract\\  tesseract.exe, sus DLL y solo spa/eng/osd: OCR de las imágenes que llegan desde MovilDeep
     Models\\    aquí van los .gguf (no se toca al rearmar)
     data\\      configuración, sesiones, key cifrada, logs (no se toca al rearmar)
     DeepSeekChat.exe  lanzador nativo con el ícono (se compila de launcher\\ con las Build Tools de Visual Studio;
@@ -26,6 +27,7 @@ import sys
 import time
 
 import actualizar
+import ocr
 import version
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +37,7 @@ LIB_EXCLUDE_DIRS = {"site-packages", "test", "idlelib", "turtledemo", "ensurepip
 DLL_EXCLUDE = ("_test*", "_ctypes_test*", "*.ico", "*.cat")
 LLAMA_KEEP = ("llama-server.exe", "llama-server-impl.dll", "llama.dll", "llama-common.dll", "mtmd.dll", "ggml*.dll",
               "libomp*.dll", "msvcp140*.dll", "vcruntime140*.dll", "cublas*.dll", "cudart*.dll", "LICENSE*")
+TESS_LANGS = ("spa.traineddata", "eng.traineddata", "osd.traineddata")
 VC_RUNTIME = ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
 # Primero el build con CUDA: con una placa NVIDIA el modelo corre en la GPU (5 a 12 veces más rápido, medido); sin
 # ella ggml-cuda.dll no carga y queda la CPU. El de USBagent es solo CPU (el pendrive de WinPE no tiene drivers de GPU).
@@ -149,8 +152,33 @@ def make_runtime_filler(py, ucrt):
     return fill
 
 
-def make_bin_filler(src, ucrt):
+def find_tesseract_dir(arg):
+    """Carpeta de Tesseract a copiar: la de --tesseract, o la primera instalación conocida (ocr.py busca igual)."""
+    if arg:
+        if not (os.path.isfile(os.path.join(arg, "tesseract.exe")) and os.path.isdir(os.path.join(arg, "tessdata"))):
+            die(f"no hay tesseract.exe con tessdata\\ en {arg}")
+        return arg
+    exe = ocr.find_tesseract()
+    return os.path.dirname(exe) if exe else ""
+
+
+def fill_tesseract(src):
     def fill(dst):
+        faltan = [x for x in TESS_LANGS if not os.path.isfile(os.path.join(src, "tessdata", x))]
+        if faltan:
+            die(f"a {src}\\tessdata le falta {', '.join(faltan)}")
+        n = copy_matching(src, dst, patterns=("tesseract.exe", "*.dll"))
+        copy_matching(os.path.join(src, "tessdata"), os.path.join(dst, "tessdata"), patterns=TESS_LANGS)
+        say(f"  bin\\tesseract: {n} archivos de {src}, idiomas {', '.join(x.split('.')[0] for x in TESS_LANGS)}")
+    return fill
+
+
+def make_bin_filler(src, ucrt, tess=""):
+    def fill(dst):
+        if tess:
+            replace_managed(os.path.join(dst, "tesseract"), fill_tesseract(tess))
+        if not src:
+            return
         n = copy_matching(src, dst, patterns=LLAMA_KEEP)
         if not os.path.isfile(os.path.join(dst, "llama-server.exe")):
             die(f"no hay llama-server.exe en {src}")
@@ -238,6 +266,8 @@ La version esta en VERSION.txt y en el titulo de la ventana.
   no sirve para llevar la key a otra PC porque el cifrado depende del usuario de Windows.
 - Modelos locales: copia archivos .gguf a la carpeta Models\\ (o a Models\\ en la raiz del pendrive). Aparecen solos en
   el selector de modelos. El motor es bin\\llama-server.exe.
+- OCR: si este portable lo trae (lo dice VERSION.txt), las imagenes que llegan desde la app MovilDeep se leen con
+  bin\\tesseract\\ (espanol e ingles). Sin el, las imagenes se guardan pero no se leen.
 - Si algo no arranca: Diagnostico.bat revisa el equipo y guarda un informe en data\\diagnostico.txt.
   Si la ventana no llega a abrirse, los errores quedan en data\\error.log. DeepSeekChat-consola.bat muestra los errores
   en pantalla.
@@ -269,6 +299,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default=os.path.join(HERE, "dist", "DeepSeekChat"))
     ap.add_argument("--llama-bin", default="")
+    ap.add_argument("--tesseract", default="", help="carpeta de Tesseract (la que tiene tesseract.exe y tessdata\\)")
     ap.add_argument("--sin-ucrt", action="store_true", help="no copiar el UCRT local (Windows 10 y 11 ya lo traen)")
     ap.add_argument("--sin-exe", action="store_true", help="no compilar el lanzador DeepSeekChat.exe")
     ap.add_argument("--sin-verificar", action="store_true", help="no correr el autodiagnóstico sobre lo armado")
@@ -292,10 +323,20 @@ def main():
     t0 = time.time()
     replace_managed(os.path.join(out, "app"), fill_app)
     replace_managed(os.path.join(out, "runtime"), make_runtime_filler(py, ucrt))
+    tess = find_tesseract_dir(a.tesseract)
+    if not tess:
+        say("  AVISO: no se encontró Tesseract; el portable queda sin OCR de imágenes. Usá --tesseract.")
     if llama:
-        replace_managed(os.path.join(out, "bin"), make_bin_filler(llama, ucrt))
+        replace_managed(os.path.join(out, "bin"), make_bin_filler(llama, ucrt, tess))
     else:
-        say("  AVISO: no se encontró llama-server.exe; se arma sin bin\\ (solo DeepSeek en la nube). Usá --llama-bin.")
+        say("  AVISO: no se encontró llama-server.exe; se arma sin modelos locales (solo DeepSeek en la nube). Usá --llama-bin.")
+        bin_dir = os.path.join(out, "bin")
+        if tess and os.path.isdir(bin_dir):
+            if not is_managed(bin_dir):
+                die(f"{bin_dir} existe y no tiene el marcador {MARKER}: no lo creó este script, no se toca.")
+            replace_managed(os.path.join(bin_dir, "tesseract"), fill_tesseract(tess))
+        elif tess:
+            replace_managed(bin_dir, make_bin_filler("", None, tess))
 
     for d in ("data", "Models"):
         os.makedirs(os.path.join(out, d), exist_ok=True)

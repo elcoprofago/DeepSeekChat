@@ -326,16 +326,19 @@ def read_text_file(path):
     raise AttachError(f"{os.path.basename(path)}: no se pudo decodificar como texto")
 
 
-def build_message(text, paths):
-    """Arma el contenido del mensaje de usuario con los archivos embebidos en bloques de código."""
+def build_message(text, paths, extra=()):
+    """Arma el contenido del mensaje de usuario con los archivos embebidos en bloques de código.
+    extra: pares (nombre, contenido) ya leídos (los adjuntos que llegan desde el celular), con los mismos límites."""
     total = 0
     parts = [text.strip()] if text.strip() else []
-    for p in paths:
-        content = read_text_file(p)
+    for p in list(paths) + list(extra):
+        if isinstance(p, tuple):
+            name, content = p
+        else:
+            name, content = os.path.basename(p), read_text_file(p)
         total += len(content.encode("utf-8"))
         if total > MAX_TOTAL_BYTES:
             raise AttachError(f"Los adjuntos suman más de {MAX_TOTAL_BYTES // (1024 * 1024)} MB")
-        name = os.path.basename(p)
         lang = _LANG_BY_EXT.get(os.path.splitext(name)[1].lower(), "")
         fence = "```"
         while fence in content:

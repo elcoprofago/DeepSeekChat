@@ -42,9 +42,16 @@ def version_txt(v):
             "ventana;\r\nsi no coinciden, Diagnostico.bat lo avisa.\r\n")
 
 
+def ocr_txt(raiz):
+    """Línea de VERSION.txt sobre el OCR: se mira el disco, así sigue siendo cierta al actualizar solo app\\."""
+    if os.path.isfile(os.path.join(raiz, "bin", "tesseract", "tesseract.exe")):
+        return "OCR de imagenes: incluido (bin\\tesseract, espanol e ingles).\r\n"
+    return "OCR de imagenes: no incluido en este portable.\r\n"
+
+
 def escribir_version_txt(raiz, v):
     with open(os.path.join(raiz, "VERSION.txt"), "w", encoding="ascii", newline="") as f:
-        f.write(version_txt(v))
+        f.write(version_txt(v) + "\r\n" + ocr_txt(raiz))
 
 
 def clave(v):
