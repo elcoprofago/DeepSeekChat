@@ -459,6 +459,7 @@ class AppBridge:
             "live": a._live, "can_continue": a._can_continue,
             "confirm": None if p is None else {"id": p["id"], "kind": p["kind"], "title": p["title"][:300], "detail": p["detail"][:6000]},
             "run": {"seq": a._run_seq, "outcome": a._run_outcome, "msg": a._run_msg},
+            "balance": a.balance_status(),
         }
 
     def state(self, n, fp, sid):

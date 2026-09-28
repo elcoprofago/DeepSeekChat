@@ -273,6 +273,10 @@ app.use_folder(ws)
 ok, msg = app.set_remote(True)
 check("premisa: servidor encendido", ok, msg)
 
+pump(lambda: app.balance_text == "US$ 4.20", 3)
+st = http("GET", "/api/state?n=0")[1]
+check("state trae el saldo tal como lo muestra la barra de la PC", st.get("balance") == "US$ 4.20", st.get("balance"))
+
 # info
 c, d = http("GET", "/api/info")
 check("/api/info: app, versión y protocolo 2", c == 200 and d == {"app": "DeepSeekChat", "version": version.VERSION, "protocol": 2}, (c, d))

@@ -912,9 +912,13 @@ class App:
             ctx = e.get("context") or 0
             txt += f"  │  Contexto: {miles(self.last_usage.get('prompt_tokens', 0))}" + (f" de {miles(ctx)}" if ctx else "")
         self.tokens_lbl.configure(text=txt)
-        self.balance_lbl.configure(text="Saldo: n/a (modelo local)" if e["kind"] == "local" else f"Saldo: {self.balance_text}")
+        self.balance_lbl.configure(text="Saldo: " + self.balance_status())
         if not self.busy:
             self._set_state("Enter envía · Shift+Enter salto de línea")
+
+    def balance_status(self):
+        """El saldo como lo muestra la barra de estado (sin «Saldo: »); también lo lee MovilDeep por /api/state."""
+        return "n/a (modelo local)" if self._entry_for(self.sess.model)["kind"] == "local" else self.balance_text
 
     def refresh_balance(self):
         key = self.cfg.api_key
