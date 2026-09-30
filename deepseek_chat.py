@@ -14,11 +14,13 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import agent as ag
 import agent_tools as at
 import chatview
+import claudeapi
 import dialogs
 import dsapi
 import explorer
@@ -37,6 +39,8 @@ TITULO_VENTANA = f"CodeAgent v{version.VERSION} - © R.A. Sistemas - 2026"      
 ICONO = "asterisc.ico"      # junto a los .py; el mismo va embebido en el lanzador CodeAgent.exe
 IMG_ENVIAR = "b-env.png"    # botón de enviar; junto a los .py
 IMG_DETENER = "b-stop.png"  # el mismo botón mientras el agente trabaja
+IMG_CLIP = "b-clip.png"     # adjuntar archivos, arriba del de enviar
+CLAUDE_COST_EVERY = 60      # s entre consultas del gasto de Claude (la API pide no más de una por minuto); ⟳ no espera
 GEOMETRIA_INICIAL = "1240x780"
 SIN_EFFORT = "(por defecto)"
 APPROVALS = {"ask": "Preguntar todo", "edits": "Editar sin preguntar", "all": "Todo sin preguntar"}
@@ -143,6 +147,9 @@ class App:
         self._last_notice = ""
         self.last_usage = None
         self.balance_text = "—"
+        self.claude_cost_text = ""       # gasto del mes en Claude (claudeapi.month_cost), para la barra de estado
+        self._claude_cost_t = 0.0        # cuándo se consultó por última vez
+        self._claude_cost_denied = ""    # key común que ya contestó «sin permiso»: no se la vuelve a probar sola
         self._suppress_select = False
         self._ui = queue.Queue()
         self.meter = meter.TokenMeter()
@@ -290,22 +297,31 @@ class App:
         self.btn_clear = ttk.Button(self.folder_bar, text="Limpiar avisos", command=self.clear_notices)
         self.btn_clear.pack(side="right")
         self.bottom = ttk.Frame(self.col, padding=(0, 6, 0, 4))
-        self.btn_plus = ttk.Button(self.bottom, text="+", width=3, command=self.add_files)
-        self.btn_plus.pack(side="left", anchor="s", padx=(0, 8))
         self.input = tk.Text(self.bottom, height=4, wrap="word", relief="flat", padx=8, pady=6, highlightthickness=1, undo=True)
-        self.input.pack(side="left", fill="x", expand=True)
         self.input.bind("<Return>", self._on_enter)
         self.input.bind("<Shift-Return>", lambda e: None)
         # imagen de enviar / detener; el texto queda guardado (con imagen, tk no lo muestra) y es el de respaldo si
         # falta alguna de las dos imágenes
         self.img_send = self._load_image(IMG_ENVIAR)
         self.img_stop = self._load_image(IMG_DETENER)
+        self.img_clip = self._load_image(IMG_CLIP)
+        # columna a la derecha del cuadro: adjuntar (clip) arriba de enviar, como en ExcelAgent
+        self.send_col = ttk.Frame(self.bottom)
+        self.send_col.pack(side="right", anchor="s", padx=(8, 0))
+        if self.img_clip:
+            self.btn_plus = tk.Button(self.send_col, text="+", image=self.img_clip, bd=0, relief="flat",
+                                      highlightthickness=0, cursor="hand2", command=self.add_files)
+        else:
+            self.btn_plus = ttk.Button(self.send_col, text="+", width=9, command=self.add_files)
+        self.btn_plus.pack(side="top", pady=(0, 4))
         if self.img_send and self.img_stop:
-            self.btn_send = tk.Button(self.bottom, text="Enviar", image=self.img_send, bd=0,
+            self.btn_send = tk.Button(self.send_col, text="Enviar", image=self.img_send, bd=0,
                                       relief="flat", highlightthickness=0, cursor="hand2", command=self.on_send_click)
         else:
-            self.btn_send = ttk.Button(self.bottom, text="Enviar", width=9, command=self.on_send_click)
-        self.btn_send.pack(side="left", anchor="s", padx=(8, 0))
+            self.btn_send = ttk.Button(self.send_col, text="Enviar", width=9, command=self.on_send_click)
+        self.btn_send.pack(side="top")
+        # el cuadro va último: se queda con el ancho que sobra y la columna de botones nunca se recorta
+        self.input.pack(side="left", fill="x", expand=True)
         # solo se ve cuando el agente cortó por el tope de pasos: un clic y sigue, sin escribir nada
         self.btn_continue = ttk.Button(self.bottom, text="Continuar", width=10, command=self.continue_run,
                                        style="Continue.TButton")
@@ -319,9 +335,10 @@ class App:
         self.status = ttk.Frame(r, padding=(10, 2, 10, 6))
         self.tokens_lbl = ttk.Label(self.status, text="")
         self.tokens_lbl.pack(side="left")
-        ttk.Button(self.status, text="⟳", width=3, command=self.refresh_balance).pack(side="right")
+        ttk.Button(self.status, text="⟳", width=3, command=lambda: self.refresh_balance(force=True)).pack(side="right")
         self.balance_lbl = ttk.Label(self.status, text="Saldo: —")
         self.balance_lbl.pack(side="right", padx=6)
+        self.balance_lbl.bind("<Button-1>", lambda e: self._balance_click())
         self.state_lbl = ttk.Label(self.status, text="")
         self.state_lbl.pack(side="right", padx=14)
 
@@ -460,6 +477,8 @@ class App:
             self.btn_send.configure(bg=t["bg"], activebackground=t["bg"])
         else:
             self.btn_send.configure(style="Accent.TButton")
+        if isinstance(self.btn_plus, tk.Button):
+            self.btn_plus.configure(bg=t["bg"], activebackground=t["bg"])
         self.sess_tree.tag_configure("cur", font=("Segoe UI", 10, "bold"))
         self._dark_titlebar()
         self._draw_meter()
@@ -546,7 +565,7 @@ class App:
         self._log_keys()
         self._key_note()
         self.refresh_models()
-        self.refresh_balance()
+        self.refresh_balance(force=True)
 
     # ------------------------------------------------------------ modelos
 
@@ -1024,21 +1043,40 @@ class App:
             ctx = e.get("context") or 0
             txt += f"  │  Contexto: {miles(self.last_usage.get('prompt_tokens', 0))}" + (f" de {miles(ctx)}" if ctx else "")
         self.tokens_lbl.configure(text=txt)
-        self.balance_lbl.configure(text="Saldo: " + self.balance_status())
+        self.balance_lbl.configure(text="Saldo: " + self.balance_status(),
+                                   cursor="hand2" if self._balance_prov() == "anthropic" else "")
         if not self.busy:
             self._set_state("Enter envía · Shift+Enter salto de línea")
 
-    def balance_status(self):
-        """El saldo como lo muestra la barra de estado (sin «Saldo: »); también lo lee MovilDeep por /api/state."""
+    def _balance_prov(self):
+        """Proveedor del modelo en uso, o None si es local."""
         e = self._entry_for(self.sess.model)
-        if e["kind"] == "local":
-            return "n/a (modelo local)"
-        p = self._prov(e)
-        if p != "deepseek":
-            return f"no disponible por API ({providers.name_of(p)})"
-        return self.balance_text
+        return None if e["kind"] == "local" else self._prov(e)
 
-    def refresh_balance(self):
+    def balance_status(self):
+        """El saldo como lo muestra la barra de estado (sin «Saldo: »); también lo lee MovilDeep por /api/state.
+        Claude: lo gastado en el mes, si la key lo permite; el disponible no lo da ninguna API (clic: la consola)."""
+        p = self._balance_prov()
+        if p == "anthropic":
+            return (self.claude_cost_text or "gasto sin consultar") + " · disponible: clic → consola"
+        if p == "deepseek":
+            return self.balance_text
+        # modelo local o proveedor sin saldo por API: igual se muestran los saldos ya consultados de las otras keys
+        known = []
+        if self.cfg.api_key and self.balance_text != "—":
+            known.append(f"DeepSeek {self.balance_text}")
+        if self.claude_cost_text:
+            known.append(f"Claude {self.claude_cost_text}")
+        head = "n/a (modelo local)" if p is None else f"no disponible por API ({providers.name_of(p)})"
+        return " · ".join([head] + known)
+
+    def _balance_click(self):
+        if self._balance_prov() == "anthropic":
+            webbrowser.open(claudeapi.BILLING_URL)
+
+    def refresh_balance(self, force=False):
+        """Saldo de DeepSeek y gasto del mes en Claude, en segundo plano. force: aunque no haya pasado el minuto."""
+        self._refresh_claude_cost(force)
         key = self.cfg.api_key
         if not key:
             return
@@ -1051,6 +1089,42 @@ class App:
                 txt = f"error ({e})"
             self.post(lambda: self._balance_loaded(txt))
         threading.Thread(target=work, daemon=True).start()
+
+    def _refresh_claude_cost(self, force=False):
+        """Con la Admin key si está cargada; si no, se prueba la key común (sirve si es personal y sin workspace)."""
+        admin = self.cfg.key(providers.ADMIN)
+        key = admin or self.cfg.key("anthropic")
+        if not key:
+            self.claude_cost_text = ""
+            return
+        now = time.time()
+        if not force and (key == self._claude_cost_denied or now - self._claude_cost_t < CLAUDE_COST_EVERY):
+            return
+        self._claude_cost_t = now
+
+        def work():
+            try:
+                res = (claudeapi.month_cost(key), None)
+            except dsapi.ApiError as e:
+                res = (None, e)
+            self.post(lambda: self._claude_cost_loaded(key, bool(admin), *res))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _claude_cost_loaded(self, key, admin, usd, err):
+        if err is None:
+            self._claude_cost_denied = ""
+            self.claude_cost_text = f"{providers.usd(usd)} gastado este mes"
+            self.log(f"Gasto de Claude este mes: {providers.usd(usd)} (informe de costos; el disponible solo figura "
+                     f"en {claudeapi.BILLING_URL}).")
+        elif not admin and getattr(err, "status", None) in (401, 403, 404):
+            self._claude_cost_denied = key
+            self.claude_cost_text = "gasto: hace falta una Admin key"
+            self.log("La key de Claude no puede leer el informe de costos: para ver el gasto del mes cargá una Admin "
+                     "key en Configuración → «Claude (Admin)» (las cuentas individuales no tienen Admin API).", "WARN")
+        else:
+            self.claude_cost_text = "gasto: error"
+            self.log(f"Gasto de Claude: {err}", "ERROR")
+        self._update_status()
 
     def _balance_loaded(self, txt):
         self.log(f"Saldo de DeepSeek: {txt}", "ERROR" if txt.startswith("error") else "INFO")
@@ -1300,7 +1374,7 @@ class App:
             self.root.after_cancel(self._blink_job)
             self._blink_job = None
         if show:
-            self.btn_continue.pack(side="left", anchor="s", padx=(8, 0), before=self.btn_send)
+            self.btn_continue.pack(side="right", anchor="s", padx=(8, 0), before=self.send_col)
             self.continue_flag.place(in_=self.chat.frame, relx=0.5, rely=0.5, anchor="center")
             self.continue_flag.lift()
             self._blink_on = True

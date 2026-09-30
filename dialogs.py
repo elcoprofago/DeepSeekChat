@@ -387,7 +387,7 @@ class SettingsDialog:
         # por defecto, la del proveedor del modelo en uso
         self.prov_var = tk.StringVar(value=providers.name_of(self.app._provider() if hasattr(self.app, "_provider") else "deepseek"))
         self.prov_cb = ttk.Combobox(head, textvariable=self.prov_var, state="readonly", width=12,
-                                    values=[providers.name_of(p) for p in providers.ORDER])
+                                    values=[providers.name_of(p) for p in providers.KEY_SLOTS])
         self.prov_cb.pack(side="left", padx=(6, 0))
         self.prov_cb.bind("<<ComboboxSelected>>", lambda e: self._provider_changed())
         self.prov_hint = ttk.Label(head, text="", style="Muted.TLabel")
@@ -432,7 +432,7 @@ class SettingsDialog:
         self._refresh_key_state()
 
     def provider(self):
-        inv = {providers.name_of(p): p for p in providers.ORDER}
+        inv = {providers.name_of(p): p for p in providers.KEY_SLOTS}
         return inv.get(self.prov_var.get(), "deepseek")
 
     def _default_mode(self):

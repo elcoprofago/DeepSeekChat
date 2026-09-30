@@ -7,6 +7,7 @@ import tempfile
 import time
 import tkinter as tk
 
+import claudeapi
 import deepseek_chat as dc
 import dialogs
 import dsapi
@@ -23,6 +24,7 @@ def check(nombre, cond, detalle=""):
 
 dsapi.list_models = lambda key: dsapi.FALLBACK_MODELS
 dsapi.get_balance = lambda key: {"available": True, "text": "US$ 1.00"}
+claudeapi.month_cost = lambda key, now=None: 1.0      # sin red: el gasto de Claude también simulado
 probadas = []
 
 

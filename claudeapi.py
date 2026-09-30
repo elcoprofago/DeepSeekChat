@@ -17,7 +17,9 @@ Reglas de la API que este módulo respeta (ver los tests en test_claudeapi.py):
 import copy
 import json
 import re
+import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 
 import dsapi
 
@@ -64,6 +66,39 @@ def _supported(caps, *path):
             return False
         cur = cur.get(k)
     return bool(isinstance(cur, dict) and cur.get("supported"))
+
+
+# El informe de costos de la Admin API (GET /v1/organizations/cost_report): cuánto se gastó, en centavos de dólar
+# como texto decimal, por día. Pide una Admin key (sk-ant-admin…) o una key personal sin workspace; la Admin API no
+# existe para cuentas individuales. El crédito DISPONIBLE (el de la página de facturación) no lo da ninguna API.
+BILLING_URL = "https://platform.claude.com/settings/billing"
+COST_PAGES = 12          # tope de páginas: un mes son 31 buckets diarios = 1 página; esto solo corta un bucle raro
+
+
+def month_start(now=None):
+    """Primer día del mes corriente, 00:00 UTC, en RFC 3339 (los buckets del informe son días UTC)."""
+    now = now or datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-01T00:00:00Z")
+
+
+def month_cost(key, now=None):
+    """Dólares gastados en la organización desde el primer día del mes (UTC), según el informe de costos."""
+    total, page = 0.0, None
+    for _ in range(COST_PAGES):
+        q = {"starting_at": month_start(now), "limit": 31}
+        if page:
+            q["page"] = page
+        data = _get("/organizations/cost_report?" + urllib.parse.urlencode(q), key)
+        try:
+            for b in data.get("data") or []:
+                for r in b.get("results") or []:
+                    total += float(r.get("amount") or 0)        # centavos
+        except (TypeError, ValueError, AttributeError):
+            raise dsapi.ApiError("Respuesta ilegible del informe de costos de Claude")
+        page = data.get("next_page")
+        if not data.get("has_more") or not page:
+            break
+    return total / 100
 
 
 def list_models(key):

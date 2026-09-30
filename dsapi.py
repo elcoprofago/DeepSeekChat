@@ -413,6 +413,7 @@ KEY_FIELDS = {
     "deepseek": ("api_key_enc", "api_key_pw"),
     "anthropic": ("anthropic_key_enc", "anthropic_key_pw"),
     "openai": ("openai_key_enc", "openai_key_pw"),
+    "anthropic_admin": ("anthropic_admin_enc", "anthropic_admin_pw"),   # solo lee el gasto del mes (providers.ADMIN)
 }
 
 
@@ -430,6 +431,8 @@ class Config:
         "anthropic_key_pw": "",
         "openai_key_enc": "",    # y para la de OpenAI
         "openai_key_pw": "",
+        "anthropic_admin_enc": "",  # Admin key de Claude, opcional: para mostrar el gasto del mes
+        "anthropic_admin_pw": "",
         "model_dirs": [],        # carpetas extra donde buscar modelos .gguf
         "llama_server_path": "", # vacío = buscar junto al programa
         "local_ctx": 16384,      # contexto con que se arranca un modelo local

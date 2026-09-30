@@ -21,7 +21,7 @@ REPO = "elcoprofago/DeepSeekChat"
 API_ULTIMA = f"https://api.github.com/repos/{REPO}/releases/latest"
 MARKER = ".build_portable"
 ICONO = "asterisc.ico"
-IMAGENES = ("b-env.png", "b-stop.png")      # botón de enviar / detener de la ventana
+IMAGENES = ("b-env.png", "b-stop.png", "b-clip.png")  # botones de enviar / detener / adjuntar de la ventana
 EXCLUIR_PREFIJO = "test_"
 EXCLUIR = ("build_portable.py",)
 

@@ -12,8 +12,13 @@ import dsapi
 OPENAI_BASE = "https://api.openai.com/v1"
 
 ORDER = ["deepseek", "anthropic", "openai"]
-NAMES = {"deepseek": "DeepSeek", "anthropic": "Claude", "openai": "OpenAI"}
-KEY_HINT = {"deepseek": "platform.deepseek.com", "anthropic": "console.anthropic.com", "openai": "platform.openai.com"}
+NAMES = {"deepseek": "DeepSeek", "anthropic": "Claude", "openai": "OpenAI", "anthropic_admin": "Claude (Admin)"}
+KEY_HINT = {"deepseek": "platform.deepseek.com", "anthropic": "console.anthropic.com", "openai": "platform.openai.com",
+            "anthropic_admin": "la consola de Claude, Admin keys; opcional"}
+# Una key que no es de un proveedor de modelos: la Admin key de Claude (sk-ant-admin…) solo sirve para leer cuánto se
+# gastó en el mes (claudeapi.month_cost); no manda mensajes. Se carga y guarda como las demás, en Configuración.
+ADMIN = "anthropic_admin"
+KEY_SLOTS = ORDER + [ADMIN]
 PREFIX = {"anthropic": "anthropic:", "openai": "openai:"}
 
 # OpenAI no informa contexto ni salida máxima en /v1/models: tabla por prefijo (el más largo que coincida gana)
@@ -48,6 +53,10 @@ def api_model(mid):
 
 def full_id(provider, api_id):
     return PREFIX.get(provider, "") + api_id
+
+
+def usd(x):
+    return f"US$ {x:,.2f}"
 
 
 def name_of(provider):
@@ -108,6 +117,8 @@ def check_key(provider, key):
     """Prueba la key. DeepSeek: devuelve el saldo ({'available', 'text'}); los demás: {'available': True, 'text': 'N modelos'}."""
     if provider == "deepseek":
         return dsapi.get_balance(key)
+    if provider == ADMIN:
+        return {"available": True, "text": f"Gastado este mes: {usd(claudeapi.month_cost(key))}"}
     n = len(list_models(provider, key))
     return {"available": True, "text": f"{n} modelo{'s' if n != 1 else ''} disponible{'s' if n != 1 else ''}"}
 
