@@ -272,8 +272,10 @@ La version esta en VERSION.txt y en el titulo de la ventana.
 - Si algo no arranca: Diagnostico.bat revisa el equipo y guarda un informe en data\\diagnostico.txt.
   Si la ventana no llega a abrirse, los errores quedan en data\\error.log. CodeAgent-consola.bat muestra los errores
   en pantalla.
-- Actualizar.bat baja la ultima version publicada en GitHub y reemplaza app\\ (la anterior queda al lado como
-  app.respaldo-...). No toca data\\, Models\\, runtime\\ ni bin\\. Hay que cerrar la aplicacion antes.
+- El boton "Actualizar" de la ventana baja la ultima version publicada en GitHub, cierra la aplicacion, reemplaza
+  app\\ (la anterior queda al lado como app.respaldo-...) y la vuelve a abrir; el resultado queda en el log. No toca
+  data\\, Models\\, runtime\\ ni bin\\. Actualizar.bat hace lo mismo con la aplicacion cerrada (y es la unica via en
+  versiones anteriores a 1.0.0.11, que no tienen el boton).
 - runtime\\ es un Python propio recortado (sin pip). bin\\ y runtime\\ se pueden regenerar con build_portable.py;
   data\\ y Models\\ son tuyos y el script nunca los toca.
 

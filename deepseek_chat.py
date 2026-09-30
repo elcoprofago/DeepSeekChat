@@ -17,6 +17,7 @@ import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+import actualizar
 import agent as ag
 import agent_tools as at
 import chatview
@@ -246,6 +247,8 @@ class App:
         self.appr_cb.pack(side="left", padx=(4, 0))
         self.appr_cb.bind("<<ComboboxSelected>>", lambda e: self.on_approval_change())
         ttk.Button(top, text="⚙ Configuración", command=self.open_settings).pack(side="right")
+        self.btn_update = ttk.Button(top, text="⬆ Actualizar", command=self.check_update)
+        self.btn_update.pack(side="right", padx=(6, 0))
         self.btn_remote = ttk.Button(top, text="📱 Remoto", command=self.open_remote)
         self.btn_remote.pack(side="right", padx=6)
         ttk.Button(top, text="Exportar", command=self.export_current).pack(side="right", padx=6)
@@ -501,6 +504,12 @@ class App:
         self.log(f"Configuración y sesiones en {self.cfg.dir}"
                  + (" (portable)." if os.path.isfile(os.path.join(os.path.dirname(dsapi.APP_DIR), "portable.flag")) else "."))
         self._log_keys()
+        res = actualizar.leer_resultado(self.cfg.dir)      # lo que dejó el reemplazo hecho por el botón Actualizar
+        if res.startswith("OK "):
+            self.log(res[3:], "OK", protect=True)
+        elif res:
+            self.log(res, "ERROR", protect=True)
+            self.warn(res)
         if self.cfg.load_warning:
             self.chat.note(self.cfg.load_warning, error=True)
             self.log(self.cfg.load_warning, "WARN")
@@ -1765,6 +1774,82 @@ class App:
         self.log("Deshacer: " + msg)
         self.explorer.refresh()
         self._persist()
+
+    # ------------------------------------------------------------ actualizar
+
+    def check_update(self):
+        """Botón «Actualizar»: consulta la última release; si es más nueva, la descarga a app.new con la ventana abierta
+        y deja el reemplazo de app\\ a actualizar.py, que corre aparte, espera a que esta ventana se cierre y la reabre."""
+        if not os.path.isfile(os.path.join(actualizar.RAIZ, "portable.flag")):
+            self.warn("Actualizar reemplaza la carpeta app\\ de una carpeta portable, y esta copia no corre desde una "
+                      f"({dsapi.APP_DIR}). Acá se actualiza con git.")
+            return
+        if self.busy:
+            self.warn("El agente está trabajando. Esperá a que termine (o detenelo) y volvé a apretar Actualizar.")
+            return
+        self.btn_update.state(["disabled"])
+        self.log("Actualizar: consultando la última versión publicada en GitHub…")
+
+        def work():
+            try:
+                res = actualizar.ultima() + (None,)
+            except Exception as e:      # noqa: BLE001 — sin red, GitHub caído, límite de consultas: se informa
+                res = (None, None, e)
+            self.post(lambda: self._update_checked(*res))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_failed(self, que, err):
+        self.btn_update.state(["!disabled"])
+        self.log(f"Actualizar: {que}: {err}. No se cambió nada.", "ERROR")
+        self.warn(f"{que[0].upper()}{que[1:]}:\n{err}\n\nNo se cambió nada: sigue la versión {version.VERSION}.")
+
+    def _update_checked(self, nueva, rel, err):
+        actual = version.VERSION
+        if err is not None:
+            return self._update_failed("no se pudo consultar GitHub", err)
+        try:
+            mas_nueva = actualizar.clave(nueva) > actualizar.clave(actual)
+        except ValueError:
+            return self._update_failed("la última release tiene una versión ilegible", repr(nueva))
+        if not mas_nueva:
+            self.btn_update.state(["!disabled"])
+            self.log(f"Actualizar: ya tenés la última versión ({actual}; la publicada es {nueva}).", "OK")
+            if self.interactive:
+                messagebox.showinfo(TITULO, f"Ya tenés la última versión ({actual}).", parent=self.root)
+            return
+        notas = (rel.get("body") or "").strip()
+        if len(notas) > 900:
+            notas = notas[:900] + "…"
+        if self.interactive and not messagebox.askyesno(
+                TITULO, f"Hay una versión nueva: {nueva} (tenés {actual}).\n\n{notas}\n\n¿Actualizar ahora?\n\n"
+                "Se descarga, la ventana se cierra, se reemplaza app\\ (la versión actual queda de respaldo al lado) "
+                "y se vuelve a abrir sola.", parent=self.root):
+            self.btn_update.state(["!disabled"])
+            self.log(f"Actualizar: {nueva} disponible; no se instaló (cancelado).")
+            return
+        self.log(f"Actualizar: descargando {nueva}…")
+
+        def work():
+            try:
+                res = (actualizar.preparar(rel, nueva), None)
+            except Exception as e:      # noqa: BLE001 — preparar() ya borró lo que había descargado
+                res = (0, e)
+            self.post(lambda: self._update_ready(nueva, *res))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_ready(self, nueva, n, err):
+        if err is not None:
+            return self._update_failed(f"la descarga de {nueva} falló", err)
+        if self.busy:                   # el agente arrancó mientras se descargaba: no se le corta el trabajo
+            return self._update_failed(f"{nueva} quedó descargada pero no se instaló",
+                                       "el agente está trabajando; volvé a apretar Actualizar cuando termine")
+        try:
+            actualizar.lanzar_reemplazo(version.VERSION, nueva)
+        except OSError as e:
+            return self._update_failed("no se pudo lanzar el reemplazo", e)
+        self.log(f"Actualizar: {nueva} descargada y verificada ({n} archivos). Se cierra para reemplazar app\\ y "
+                 "vuelve a abrirse sola.", "OK")
+        self.on_close()
 
     # ------------------------------------------------------------ cierre
 
