@@ -35,6 +35,12 @@ root = tk.Tk()
 cv = chatview.ChatView(root, copiado.append)
 cv.frame.pack(fill="both", expand=True)
 cv.apply_theme(TEMA, 10)
+check("CONTROL: un tema sin chat_bg usa su bg", cv.text.cget("bg") == "#fff", cv.text.cget("bg"))
+cv.apply_theme(dict(TEMA, chat_bg="#000000"), 10)
+check("el fondo del chat es chat_bg (negro en el tema oscuro)", cv.text.cget("bg") == "#000000", cv.text.cget("bg"))
+import theme          # noqa: E402
+check("el tema oscuro trae el chat en negro", theme.THEMES["oscuro"]["chat_bg"] == "#000000")
+cv.apply_theme(TEMA, 10)
 
 historial = [
     {"role": "user", "content": msg},

@@ -672,6 +672,15 @@ class ToolBox:
 
     # ------------------------------------------------------------ escritura
 
+    def _free_name(self, tail):
+        """Ruta nueva en la carpeta de copias: fecha y hora + tail, con -2, -3... si ya existe. Sin esto, dos copias del
+        mismo archivo en el mismo segundo (deshacer y volver a cambiar) se pisaban, y se perdía la anterior."""
+        stem = f"{time.strftime('%Y%m%d-%H%M%S')}-{tail}"
+        dst, n = os.path.join(self.backup_dir, stem), 2
+        while os.path.lexists(dst):
+            dst, n = os.path.join(self.backup_dir, f"{stem}-{n}"), n + 1
+        return dst
+
     def _backup(self, p):
         """Copia el archivo antes de tocarlo. Devuelve la ruta de la copia (None si el archivo es nuevo)."""
         if not os.path.exists(p):
@@ -679,8 +688,7 @@ class ToolBox:
         if not self.backup_dir:
             raise ToolError("no backup folder configured; refusing to overwrite without a way to undo")
         os.makedirs(self.backup_dir, exist_ok=True)
-        name = f"{time.strftime('%Y%m%d-%H%M%S')}-{len(self.journal):03d}-{self.rel(p).replace('/', '__')}"
-        dst = os.path.join(self.backup_dir, name)
+        dst = self._free_name(f"{len(self.journal):03d}-{self.rel(p).replace('/', '__')}")
         shutil.copy2(p, dst)
         if os.path.getsize(dst) != os.path.getsize(p):
             raise ToolError("backup verification failed; file not modified")
@@ -755,7 +763,7 @@ class ToolBox:
         if not self._ask("delete", f"Borrar {self.rel(p)}", detail):
             return "DENIED: the user did not allow this deletion. Do not retry it; ask the user what they want."
         os.makedirs(self.backup_dir, exist_ok=True)
-        dst = os.path.join(self.backup_dir, f"{time.strftime('%Y%m%d-%H%M%S')}-{len(self.journal):03d}-borrado-{self.rel(p).replace('/', '__')}")
+        dst = self._free_name(f"{len(self.journal):03d}-borrado-{self.rel(p).replace('/', '__')}")
         try:
             shutil.move(p, dst)
         except OSError:
@@ -808,7 +816,7 @@ class ToolBox:
         finally:
             guardadas = self._keep_changed(copias)
         if guardadas:
-            result += ("\n[DeepSeekChat kept a copy of what this command overwrote: " + ", ".join(guardadas)
+            result += ("\n[CodeAgent kept a copy of what this command overwrote: " + ", ".join(guardadas)
                        + ". The user can restore it with undo.]")
         return result
 
@@ -917,7 +925,7 @@ class ToolBox:
         if not (self.backup_dir and os.path.isfile(p)):
             return None
         os.makedirs(self.backup_dir, exist_ok=True)
-        dst = os.path.join(self.backup_dir, f"{time.strftime('%Y%m%d-%H%M%S')}-antes-de-deshacer-{self.rel(p).replace('/', '__')}")
+        dst = self._free_name(f"antes-de-deshacer-{self.rel(p).replace('/', '__')}")
         shutil.copy2(p, dst)
         return dst
 

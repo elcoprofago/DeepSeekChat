@@ -74,7 +74,7 @@ class ChatView:
     def apply_theme(self, t, fs):
         self.t = t
         c = self.text
-        c.configure(bg=t["panel"], fg=t["fg"], insertbackground=t["fg"], highlightbackground=t["border"],
+        c.configure(bg=t.get("chat_bg", t["bg"]), fg=t["fg"], insertbackground=t["fg"], highlightbackground=t["border"],
                     highlightcolor=t["border"], font=("Segoe UI", fs), selectbackground=t["accent"], selectforeground=t["accent_fg"])
         c.tag_configure("hdr_user", foreground=t["user"], font=("Segoe UI", fs, "bold"), spacing1=10)
         c.tag_configure("hdr_bot", foreground=t["bot"], font=("Segoe UI", fs, "bold"), spacing1=10)

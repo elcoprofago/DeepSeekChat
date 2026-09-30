@@ -1,4 +1,5 @@
-"""DeepSeek Chat: agente de programación con ventana. Sesiones, explorador de carpetas, modelos de DeepSeek y locales.
+"""CodeAgent (antes DeepSeek Chat): agente de programación con ventana. Sesiones, explorador de carpetas, modelos por API
+(DeepSeek, Claude, OpenAI) y locales.
 
 Toda la lógica del agente vive en agent.py / agent_tools.py; acá solo está la ventana y el hilo que las conecta.
 Regla de hilos: tkinter solo se toca desde el hilo principal. El hilo de trabajo deja lo que quiere mostrar en una
@@ -11,6 +12,7 @@ import queue
 import re
 import subprocess
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -21,16 +23,18 @@ import dialogs
 import dsapi
 import explorer
 import localmodels
+import logpanel
 import meter
 import prompts
+import providers
 import remote
 import sessions
 import theme
 import version
 
-TITULO = "DeepSeek Chat"
-TITULO_VENTANA = f"DeepSeek Chat v{version.VERSION} - © R.A. Sistemas - 2026"      # formato de USBagent, más la versión
-ICONO = "asterisc.ico"      # junto a los .py; el mismo va embebido en el lanzador DeepSeekChat.exe
+TITULO = "CodeAgent"
+TITULO_VENTANA = f"CodeAgent v{version.VERSION} - © R.A. Sistemas - 2026"      # formato de USBagent, más la versión
+ICONO = "asterisc.ico"      # junto a los .py; el mismo va embebido en el lanzador CodeAgent.exe
 IMG_ENVIAR = "b-env.png"    # botón de enviar; junto a los .py
 IMG_DETENER = "b-stop.png"  # el mismo botón mientras el agente trabaja
 GEOMETRIA_INICIAL = "1240x780"
@@ -55,7 +59,7 @@ def system_power(action):
         ok = ctypes.windll.powrprof.SetSuspendState(False, False, False)
         return bool(ok), "" if ok else f"Windows no suspendió la PC (error {ctypes.GetLastError()})."
     if action == "shutdown":
-        args = ["shutdown", "/s", "/t", str(SHUTDOWN_DELAY), "/c", "Apagado pedido desde MovilDeep (DeepSeek Chat)."]
+        args = ["shutdown", "/s", "/t", str(SHUTDOWN_DELAY), "/c", "Apagado pedido desde MovilDeep (CodeAgent)."]
     elif action == "cancel":
         args = ["shutdown", "/a"]
     else:
@@ -104,7 +108,9 @@ class App:
         self._stream_factory = stream_factory
         self.interactive = interactive
         self.store = sessions.SessionStore(self.cfg.sessions_dir)
-        self.remote_models = list(dsapi.FALLBACK_MODELS)
+        # los modelos por API de todos los proveedores con key; cada entrada lleva 'provider' (ver providers.py)
+        self.remote_models = providers.fallback("deepseek") + [e for p in providers.ORDER[1:] if self.cfg.key(p)
+                                                                   for e in providers.fallback(p)]
         self.local_models = []
         self._display_to_id = {}
         self.themes = theme.THEMES
@@ -127,6 +133,9 @@ class App:
         self._shutdown_win = None
         self._live = {"content": "", "rlen": 0}      # el paso en curso, para quien mira por el celular
         self._pending_confirm = None
+        self._loading = None        # hora de inicio mientras se carga un modelo local (spinner del log)
+        self._run_t0 = 0.0
+        self._step = {"n": 0, "chars": 0, "t": 0.0}      # el paso en curso, para la línea viva del log
         self._confirm_seq = 0
         self._can_continue = False
         # cómo terminó la última ejecución, para MovilDeep: seq sube en 1 con cada fin (así un fin entre dos consultas no se pierde)
@@ -196,7 +205,7 @@ class App:
                     pass          # el widget al que apuntaba ya no existe
         finally:
             try:
-                self.root.after(40, self._drain_ui)
+                self._drain_job = self.root.after(40, self._drain_ui)
             except tk.TclError:
                 pass
 
@@ -236,7 +245,9 @@ class App:
         self.btn_undo = ttk.Button(top, text="Deshacer cambio", command=self.undo)
         self.btn_undo.pack(side="right")
 
-        self.main = ttk.PanedWindow(r, orient="horizontal")
+        # arriba la zona de trabajo (sesiones/explorador + chat), abajo el panel de log; el separador se arrastra
+        self.vpane = ttk.PanedWindow(r, orient="vertical")
+        self.main = ttk.PanedWindow(self.vpane, orient="horizontal")
         self.side = ttk.PanedWindow(self.main, orient="vertical")
         self.col = ttk.Frame(self.main)
         self.main.add(self.side, weight=0)
@@ -304,7 +315,8 @@ class App:
         self.continue_flag.bind("<Button-1>", lambda e: self.continue_run())
         self._blink_job = None
         self._blink_on = True
-        self.status = ttk.Frame(self.col, padding=(0, 0, 0, 6))
+        # a todo el ancho de la ventana, también debajo de sesiones/explorador (se empaqueta antes que self.main)
+        self.status = ttk.Frame(r, padding=(10, 2, 10, 6))
         self.tokens_lbl = ttk.Label(self.status, text="")
         self.tokens_lbl.pack(side="left")
         ttk.Button(self.status, text="⟳", width=3, command=self.refresh_balance).pack(side="right")
@@ -330,8 +342,23 @@ class App:
         self.attach_bar.pack(side="bottom", fill="x")
         self.folder_bar.pack(side="bottom", fill="x")
         self.chat.frame.pack(fill="both", expand=True)
-        self.main.pack(fill="both", expand=True, padx=10)
+        self.logp = logpanel.LogPanel(r, self.vpane, self.cfg, post=self.post, follow=lambda: self.busy,
+                                      fit=lambda g: fit_geometry(g, virtual_screen(r), 360, 160))
+        self.vpane.add(self.main, weight=1)
+        self.vpane.add(self.logp.frame, weight=0)
+        self.vpane.pack(fill="both", expand=True, padx=10)
         self.root.after(50, self._place_sash)
+        self.root.after(80, self._place_log)
+
+    def _place_log(self):
+        try:
+            self.root.update_idletasks()
+            if self.cfg["log_detached"]:
+                self.logp.detach()
+            else:
+                self.logp.place()
+        except (tk.TclError, ValueError):
+            pass
 
     # ------------------------------------------------------------ medidor de tokens
 
@@ -439,9 +466,25 @@ class App:
 
     # ------------------------------------------------------------ arranque
 
+    def log(self, msg, level="INFO", overwrite=False, protect=False):
+        """Una línea en el panel de log (logpanel.py). Se puede llamar desde cualquier hilo."""
+        self.logp.log(msg, level, overwrite, protect)
+
+    def _log_keys(self):
+        estado = []
+        for p in providers.ORDER:
+            s = "cargada" if self.cfg.key(p) else "bloqueada con contraseña" if self.cfg.needs_unlock_of(p) else "sin cargar"
+            estado.append(f"{providers.name_of(p)} {s}")
+        self.log("API keys: " + " · ".join(estado) + ".")
+
     def _startup(self):
+        self.log(f"CodeAgent {version.VERSION} iniciado.", "OK", protect=True)
+        self.log(f"Configuración y sesiones en {self.cfg.dir}"
+                 + (" (portable)." if os.path.isfile(os.path.join(os.path.dirname(dsapi.APP_DIR), "portable.flag")) else "."))
+        self._log_keys()
         if self.cfg.load_warning:
             self.chat.note(self.cfg.load_warning, error=True)
+            self.log(self.cfg.load_warning, "WARN")
         self._refresh_model_widgets()
         s = None
         if self.cfg["last_session"]:
@@ -452,6 +495,7 @@ class App:
         self._activate(s or self._blank_session(""))
         for w in self.store.warnings:
             self.chat.note(w, error=True)
+            self.log(w, "WARN")
         self._key_prompt()
         if self.cfg["remote_enabled"]:
             ok, msg = self.start_remote()
@@ -459,33 +503,47 @@ class App:
                 self.chat.note(msg, error=True)
         self.refresh_models()
         self.refresh_balance()
+        self.log("Buscando modelos locales (.gguf)…")
         threading.Thread(target=self._scan_thread, daemon=True).start()
 
     def _scan_thread(self):
         found = localmodels.scan_models(localmodels.default_model_dirs(self.cfg))
         self.post(lambda: self._set_local_models(found))
 
+    def _provider(self):
+        """El proveedor cuya key necesita el modelo actual. Con un modelo local, DeepSeek (el aviso de siempre)."""
+        e = self._entry_for(self.sess.model) if self.sess and self.sess.model else None
+        return self._prov(e) if e and e["kind"] == "remote" else "deepseek"
+
+    @staticmethod
+    def _prov(e):
+        return e.get("provider") or providers.provider_of(e["id"])
+
     def _key_note(self):
         """Deja (o quita) el aviso gris de key. Idempotente: se puede llamar cuantas veces haga falta."""
         self.chat.clear_tagged("nokey")
-        if self.cfg.api_key:
+        p = self._provider()
+        if self.cfg.key(p):
             return
-        if self.cfg.needs_unlock:
-            self.chat.note("La API key está guardada con contraseña. Desbloquéala para usar los modelos de DeepSeek "
+        name = providers.name_of(p)
+        if self.cfg.needs_unlock_of(p):
+            self.chat.note(f"La API key de {name} está guardada con contraseña. Desbloquéala para usar los modelos de {name} "
                            "(los locales funcionan sin key).", False, "nokey")
         else:
-            self.chat.note("Falta la API key. Abrí ⚙ Configuración para cargarla (los modelos locales no la necesitan).", False, "nokey")
+            self.chat.note(f"Falta la API key de {name}. Abrí ⚙ Configuración para cargarla (los modelos locales no la necesitan).",
+                           False, "nokey")
 
     def _key_prompt(self):
         """Abre la ventana que corresponde al arrancar, sin insistir si ya hay un modelo local para trabajar."""
-        if not self.interactive or self.cfg.api_key:
+        if not self.interactive or self.cfg.key(self._provider()):
             return
-        if self.cfg.needs_unlock:
+        if self.cfg.locked():
             self.root.after(300, lambda: dialogs.UnlockDialog(self))
-        elif not self.local_models:
+        elif not self.local_models and not any(self.cfg.key(p) for p in providers.ORDER):
             self.root.after(300, self.open_settings)
 
     def key_changed(self):
+        self._log_keys()
         self._key_note()
         self.refresh_models()
         self.refresh_balance()
@@ -496,7 +554,7 @@ class App:
         """El modelo (remoto o local) de un id guardado. Si ya no está en las listas se fabrica uno, para no perder la sesión."""
         for m in self.remote_models:
             if m["id"] == mid:
-                return {**m, "kind": "remote"}
+                return {**m, "kind": "remote", "provider": self._prov(m)}
         for m in self.local_models:
             if m["id"] == mid:
                 return self._local_entry(m)
@@ -510,17 +568,22 @@ class App:
                     return self._local_entry(same[0])
             return {"id": mid, "kind": "local", "name": base[:-5] if base.lower().endswith(".gguf") else base, "path": path,
                     "size": 0, "efforts": [], "context": int(self.cfg["local_ctx"]), "missing": not os.path.isfile(path)}
-        return {"id": mid, "kind": "remote", "name": mid, "efforts": [], "context": 0}
+        p = providers.provider_of(mid)
+        for m in providers.fallback(p):          # sin key o sin listar todavía: los datos conocidos del modelo
+            if m["id"] == mid:
+                return m
+        return {"id": mid, "kind": "remote", "provider": p, "name": providers.api_model(mid), "efforts": [], "context": 0}
 
     def _display(self, entry):
         if entry["kind"] == "remote":
-            return entry["id"]
+            p = self._prov(entry)
+            return entry["id"] if p == "deepseek" else f"[{providers.name_of(p)}] {providers.api_model(entry['id'])}"
         if entry.get("missing"):
             return f"[local] {entry['name']} (no encontrado)"
         return f"[local] {entry['name']}" + (f" ({localmodels.format_size(entry['size'])})" if entry.get("size") else "")
 
     def _all_entries(self):
-        return [{**m, "kind": "remote"} for m in self.remote_models] + \
+        return [{**m, "kind": "remote", "provider": self._prov(m)} for m in self.remote_models] + \
                [self._local_entry(m) for m in self.local_models]
 
     def _local_entry(self, m):
@@ -561,6 +624,8 @@ class App:
         if not mid or self.busy:
             self._refresh_model_widgets()      # vuelve a mostrar el modelo real de la sesión
             return
+        if mid != self.sess.model:
+            self.log(f"Modelo: {self.model_var.get()}")
         self.sess.model = mid
         self.cfg["model"] = mid
         try:
@@ -568,6 +633,7 @@ class App:
         except OSError:
             pass
         self._refresh_effort_widgets()
+        self._key_note()
         self._update_status()
         self._persist()
 
@@ -579,24 +645,37 @@ class App:
         self._persist()
 
     def refresh_models(self):
-        key = self.cfg.api_key
-        if not key:
-            return
+        """Lista los modelos de cada proveedor con key, cada uno en su hilo. Los de un proveedor sin key salen de la
+        lista (los de DeepSeek quedan: son los de siempre, y el aviso de key explica qué falta)."""
+        for p in providers.ORDER:
+            key = self.cfg.key(p)
+            if not key:
+                if p != "deepseek" and any(self._prov(m) == p for m in self.remote_models):
+                    self._set_remote_models([], p)
+                continue
+            if p != "deepseek" and not any(self._prov(m) == p for m in self.remote_models):
+                self._set_remote_models(providers.fallback(p), p)      # se ven ya, mientras llega la lista real
 
-        def work():
-            try:
-                res = dsapi.list_models(key)
-            except dsapi.ApiError as e:
-                self.post(lambda: self._set_state(f"No se pudo listar los modelos de DeepSeek: {e}", error=True))
-                return
-            self.post(lambda: self._set_remote_models(res))
-        threading.Thread(target=work, daemon=True).start()
+            def work(p=p, key=key):
+                try:
+                    res = providers.list_models(p, key)
+                except dsapi.ApiError as e:
+                    self.post(lambda: self._set_state(f"No se pudo listar los modelos de {providers.name_of(p)}: {e}", error=True))
+                    return
+                self.log(f"Modelos de {providers.name_of(p)}: {len(res)} disponibles.", "OK")
+                self.post(lambda: self._set_remote_models(res, p))
+            threading.Thread(target=work, daemon=True).start()
 
-    def _set_remote_models(self, res):
-        self.remote_models = res
+    def _set_remote_models(self, res, provider="deepseek"):
+        """Reemplaza los modelos de un proveedor, conservando los de los demás (en el orden de providers.ORDER)."""
+        keep = [m for m in self.remote_models if self._prov(m) != provider]
+        new = [{**m, "kind": "remote", "provider": provider} for m in res]
+        allm = keep + new
+        self.remote_models = sorted(allm, key=lambda m: providers.ORDER.index(self._prov(m)))
         self._refresh_model_widgets()
 
     def _set_local_models(self, found):
+        self.log(f"Modelos locales encontrados: {len(found)}.", "OK" if found else "INFO")
         self.local_models = found
         self._refresh_model_widgets()
         self._update_status()
@@ -658,6 +737,7 @@ class App:
         """Deja a s como sesión actual: herramientas, explorador, selectores y transcripción."""
         fixed = ag.repair(s.messages)
         self.sess = s
+        self.log(f"Sesión abierta: «{s.display_title}»" + (f" · {len(s.messages)} mensajes" if s.messages else " (vacía)"))
         self.cfg["last_session"] = s.id
         try:
             self.cfg.save()
@@ -701,7 +781,9 @@ class App:
 
     @staticmethod
     def _label_of(e):
-        return "DeepSeek" if e is None or e["kind"] == "remote" else e["name"]
+        if e is None:
+            return "DeepSeek"
+        return providers.name_of(e.get("provider") or providers.provider_of(e["id"])) if e["kind"] == "remote" else e["name"]
 
     def _retitle(self):
         self.root.title(TITULO_VENTANA)     # fijo (pedido del usuario); la sesión y la carpeta ya se ven en la barra lateral y bajo el chat
@@ -861,6 +943,7 @@ class App:
         if self.busy:
             self._busy_note()
             return
+        self.log(f"Carpeta de trabajo: {path}")
         if not self.sess.messages:
             self.sess.workspace = path
             self._make_toolbox()
@@ -927,6 +1010,8 @@ class App:
 
     def _set_state(self, txt, error=False):
         self.state_lbl.configure(text=txt, style="Err.TLabel" if error else "TLabel")
+        if error:
+            self.log(txt, "ERROR")
 
     def _update_status(self):
         s = self.sess
@@ -945,7 +1030,13 @@ class App:
 
     def balance_status(self):
         """El saldo como lo muestra la barra de estado (sin «Saldo: »); también lo lee MovilDeep por /api/state."""
-        return "n/a (modelo local)" if self._entry_for(self.sess.model)["kind"] == "local" else self.balance_text
+        e = self._entry_for(self.sess.model)
+        if e["kind"] == "local":
+            return "n/a (modelo local)"
+        p = self._prov(e)
+        if p != "deepseek":
+            return f"no disponible por API ({providers.name_of(p)})"
+        return self.balance_text
 
     def refresh_balance(self):
         key = self.cfg.api_key
@@ -962,6 +1053,7 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def _balance_loaded(self, txt):
+        self.log(f"Saldo de DeepSeek: {txt}", "ERROR" if txt.startswith("error") else "INFO")
         self.balance_text = txt
         self._update_status()
 
@@ -1004,13 +1096,14 @@ class App:
         if self.busy:
             return False, "El agente está trabajando: esperá o detenelo."
         e = self._entry_for(self.sess.model)
-        if e["kind"] == "remote" and not self.cfg.api_key:
-            return False, "Falta la API key en la PC (o está bloqueada con contraseña)."
+        if e["kind"] == "remote" and not self.cfg.key(self._prov(e)):
+            return False, f"Falta la API key de {providers.name_of(self._prov(e))} en la PC (o está bloqueada con contraseña)."
         full_text, extra = self._with_uploads(text, uploads)
         try:
             dsapi.build_message(full_text, [], extra)     # el tope de 2 MB entre todos: se avisa al celular, no a la PC
         except dsapi.AttachError as err:
             return False, str(err)
+        self.log("Pedido recibido desde MovilDeep.")
         self.send(text, keep_draft=True, uploads=uploads)  # keep_draft: no toca lo que la persona tenga escrito en la PC
         return True, ""
 
@@ -1088,6 +1181,7 @@ class App:
             return False, "Acción desconocida: se puede apagar («shutdown») o suspender («suspend»)."
         if self.busy:
             return False, BUSY_POWER_NOTE
+        self.log(f"MovilDeep pidió {'suspender' if action == 'suspend' else 'apagar'} la PC.", "WARN")
         if action == "suspend":
             self.chat.note("MovilDeep pidió suspender la PC: se suspende en 3 segundos.")
             self.root.after(SUSPEND_DELAY_MS, self._suspend_now)
@@ -1148,14 +1242,17 @@ class App:
         try:
             srv.start()
         except OSError as e:
+            self.log(f"Acceso remoto: no se pudo abrir el puerto {self.cfg['remote_port']}: {e}", "ERROR")
             return False, f"No se pudo abrir el puerto {self.cfg['remote_port']}: {e}"
         self.remote_srv = srv
+        self.log(f"Acceso remoto (MovilDeep) activo en el puerto {self.cfg['remote_port']}.", "OK")
         return True, ""
 
     def stop_remote(self):
         if self.remote_srv is not None:
             self.remote_srv.stop()
             self.remote_srv = None
+            self.log("Acceso remoto apagado.")
 
     def set_remote(self, enabled):
         """Enciende o apaga y lo deja guardado. Devuelve (ok, mensaje)."""
@@ -1240,10 +1337,10 @@ class App:
             return
         s = self.sess
         entry = self._entry_for(s.model)
-        if entry["kind"] == "remote" and not self.cfg.api_key:
+        if entry["kind"] == "remote" and not self.cfg.key(self._prov(entry)):
             self._key_note()
             if self.interactive:
-                if self.cfg.needs_unlock:
+                if self.cfg.needs_unlock_of(self._prov(entry)):
                     dialogs.UnlockDialog(self)
                 else:
                     self.open_settings()
@@ -1265,6 +1362,11 @@ class App:
             self._redraw_attachments()
         self._show_continue(False)
         self.cancel_ev = threading.Event()
+        self._run_t0 = time.time()
+        extra_txt = f" · esfuerzo {s.effort}" if s.effort else ""
+        n_adj = len(files) + len(extra)
+        self.log(f"Enviando a {self._display(entry)}{extra_txt} · permisos: {APPROVALS[s.approval]}"
+                 + (f" · {n_adj} adjunto(s)" if n_adj else ""))
         self._set_busy(True)
         self.worker = threading.Thread(target=self._work, args=(s, entry, self.toolbox, n0, text, files, self.cancel_ev), daemon=True)
         self.worker.start()
@@ -1303,8 +1405,8 @@ class App:
             return self._stream_factory(entry, msgs, tools)
         if entry["kind"] == "local":
             return dsapi.ChatStream(None, entry["name"], msgs, None, self._local_max_tokens(), base=base, tools=tools, timeout=LOCAL_TIMEOUT)
-        effort = s.effort if s.effort in (entry["efforts"] or []) else None   # el de un modelo local no viaja a DeepSeek
-        return dsapi.ChatStream(self.cfg.api_key, entry["id"], msgs, effort, self.cfg["max_tokens"], tools=tools)
+        effort = s.effort if s.effort in (entry["efforts"] or []) else None   # el de un modelo local no viaja a la API
+        return providers.make_stream(entry, self.cfg.key(self._prov(entry)), msgs, effort, self.cfg["max_tokens"], tools=tools)
 
     def _local_max_tokens(self):
         """Tope de respuesta de un modelo local. Es también lo que se le reserva dentro de la ventana: el historial
@@ -1328,7 +1430,10 @@ class App:
                 s.totals["in"] += u.get("prompt_tokens", 0)
                 s.totals["out"] += u.get("completion_tokens", 0)
                 s.totals["reason"] += (u.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
-                s.totals["hit"] += u.get("prompt_cache_hit_tokens", 0)
+                hit = u.get("prompt_cache_hit_tokens")
+                if hit is None:      # OpenAI lo informa en otro lado; DeepSeek puede mandar los dos: no se suman
+                    hit = (u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+                s.totals["hit"] += hit
             elif kind in ("step_end", "tool_result") and not ag.validate(s.messages):
                 try:
                     self.store.save(s)      # un corte de luz o un cierre brusco no pierde lo ya hecho
@@ -1342,10 +1447,17 @@ class App:
                 self.post(lambda: self._set_state("Cargando el modelo local (puede tardar un rato)…"))
                 if entry.get("missing"):
                     raise localmodels.LocalError(f"No se encuentra el modelo {entry['path']} (¿está conectado el pendrive?).")
-                base = self._local_server().ensure(entry["path"], int(self.cfg["local_ctx"]), cancel,
-                                                   reasoning=localmodels.reasoning_for(entry["path"], s.effort))
+                t0 = self._loading = time.time()
+                self.post(lambda: self._loading_tick(entry["name"], t0))
+                try:
+                    base = self._local_server().ensure(entry["path"], int(self.cfg["local_ctx"]), cancel,
+                                                       reasoning=localmodels.reasoning_for(entry["path"], s.effort))
+                finally:
+                    self._loading = None
+                self.log(f"Modelo local {entry['name']} listo ({time.time() - t0:.0f} s).", "OK", overwrite=True, protect=True)
             agent = ag.Agent(lambda msgs, tools: self._make_stream(entry, s, base, msgs, tools, toolbox), toolbox,
-                             max_steps=self.max_steps, label=self._label_of(entry), **self._agent_budget(entry, toolbox))
+                             max_steps=self.max_steps, label=self._label_of(entry), **self._agent_budget(entry, toolbox),
+                             keep=("_blocks",) if entry["kind"] == "remote" and self._prov(entry) == "anthropic" else ())
             self.agent = agent
             outcome = agent.run(s.messages, emit, cancel)
         except Exception as e:                      # noqa: BLE001 — cualquier falla se muestra, ninguna se traga
@@ -1369,6 +1481,13 @@ class App:
             except OSError as e:
                 self.post(lambda: self.chat.note(f"No se pudo guardar la sesión: {e}", error=True))
             self.post(lambda: self._run_finished(outcome, error, restore))
+
+    def _loading_tick(self, name, t0):
+        """Spinner en el log mientras llama-server carga el modelo (no informa porcentaje: se muestran los segundos)."""
+        if self._loading is not t0:
+            return
+        self.log(f"Cargando el modelo local {name}… {time.time() - t0:3.0f} s  {self.logp.spin()}", "SPINNER", overwrite=True)
+        self.root.after(250, lambda: self._loading_tick(name, t0))
 
     def _confirm(self, kind, title, detail):
         """Corre en el hilo del agente: pide permiso en la ventana y espera la respuesta sin bloquear la interfaz."""
@@ -1421,6 +1540,8 @@ class App:
             c.assistant_header(self._label())
             c.begin_stream()
             self._set_state("Pensando…")
+            self._step = {"n": a[0] if a else self._step["n"] + 1, "chars": 0, "t": 0.0, "open": True, "usage": None}
+            self.log(f"Paso {self._step['n']} · esperando al modelo…  {self.logp.spin()}", "SPINNER", overwrite=True)
         elif kind in ("reasoning", "content"):
             c.stream_piece(kind, a[0])
             if kind == "content":
@@ -1429,10 +1550,21 @@ class App:
                 self._live["rlen"] += len(a[0])
             self.meter.piece(a[0])
             self._set_state("Razonando…" if kind == "reasoning" else "Escribiendo…")
+            st = self._step
+            st["chars"] += len(a[0])
+            now = time.monotonic()
+            if now - st["t"] >= 0.2:          # el texto llega de a pedacitos: la línea viva se redibuja 5 veces por segundo
+                st["t"] = now
+                self.log(f"Paso {st['n']} · {'razonando' if kind == 'reasoning' else 'escribiendo'}  {self.logp.spin()}  "
+                         f"{miles(st['chars'])} caracteres", "SPINNER", overwrite=True)
         elif kind == "usage":
             self.last_usage = a[0]
             self.meter.usage(a[0])
             self._update_status_keep_busy()
+            if self._step.get("open"):
+                self._step["usage"] = a[0]      # se escribe al cerrar el paso, debajo de su resumen
+            else:
+                self._log_usage(a[0])
         elif kind == "step_end":
             p = a[0]
             self.meter.step_end()
@@ -1440,17 +1572,44 @@ class App:
             c.clear_stream()
             note = "⚠ La respuesta se cortó por el límite de tokens de salida (ajustable en Configuración)." if p.get("finish") == "length" else None
             c.assistant_body(p.get("reasoning", ""), p.get("content", ""), note, final=not p.get("calls"))
+            st = self._step
+            st["open"] = False
+            calls = len(p.get("calls") or [])
+            self.log(f"Paso {st['n']} terminado · {miles(st['chars'])} caracteres"
+                     + (f" · pide {calls} herramienta(s)" if calls else ""), "OK", overwrite=True, protect=True)
+            if st.get("usage"):
+                self._log_usage(st["usage"])
+            if note:
+                self.log("La respuesta se cortó por el límite de tokens de salida.", "WARN")
         elif kind == "tool_start":
             c.tool_call(a[1], a[2])
             self._set_state(f"Ejecutando {a[1]}…")
+            args = a[2] if isinstance(a[2], str) else json.dumps(a[2], ensure_ascii=False)
+            self.log(f"→ {a[1]} {self._short(args)}")
         elif kind == "tool_result":
             c.tool_result(a[2])
             if a[1] in MUTATING:
                 self.explorer.refresh()
             self._set_state("Pensando…")
+            res = str(a[2])
+            self.log(f"← {a[1]}: {self._short(res)}", "ERROR" if res.startswith("ERROR") else "OK")
         elif kind == "notice":
             c.note("• " + a[0])
             self._last_notice = a[0]
+            self.log(a[0], "WARN")
+
+    @staticmethod
+    def _short(txt, n=160):
+        line = " ".join(str(txt).split())
+        return line if len(line) <= n else line[:n - 1] + "…"
+
+    def _log_usage(self, u):
+        """Tokens del paso y cuánto del contexto del modelo ocupa (barra como las de PostOCRNormalizer)."""
+        pin, pout = u.get("prompt_tokens", 0), u.get("completion_tokens", 0)
+        self.log(f"Tokens: {miles(pin)} entrada · {miles(pout)} salida")
+        ctx = self._entry_for(self.sess.model).get("context") or 0
+        if ctx and pin:
+            self.log(logpanel.progreso("Contexto", pin, ctx), "WARN" if pin / ctx >= 0.8 else "SPINNER")
 
     def _update_status_keep_busy(self):
         txt = self.state_lbl.cget("text")
@@ -1478,6 +1637,16 @@ class App:
             c.note("✖ " + error, error=True)
         elif outcome == "cancelled":
             c.note("■ Interrumpido.")
+        self._step["open"] = False
+        dur = f"{time.time() - self._run_t0:.1f} s" if self._run_t0 else ""
+        if error:     # reemplaza la línea viva (spinner) si quedó una: el error es lo que importa
+            self.log(f"✖ {self._short(error, 300)}", "ERROR", overwrite=True, protect=True)
+        elif outcome == "cancelled":
+            self.log(f"■ Interrumpido ({dur}).", "WARN", overwrite=True, protect=True)
+        elif outcome == "done":
+            self.log(f"Terminado en {dur}.", "OK", protect=True)
+        else:
+            self.log(f"Detenido ({outcome}) tras {dur}.", "WARN", protect=True)
         self._record_run(outcome, error)
         self._set_busy(False)
         # también si «Continuar» mismo falló (red caída): el botón vuelve a estar para reintentar
@@ -1485,7 +1654,8 @@ class App:
         self.refresh_sessions()
         self.explorer.refresh()
         self._retitle()
-        if self._entry_for(self.sess.model)["kind"] == "remote":
+        e = self._entry_for(self.sess.model)
+        if e["kind"] == "remote" and self._prov(e) == "deepseek":
             self.refresh_balance()
 
     def _record_run(self, outcome, error):
@@ -1515,6 +1685,7 @@ class App:
         except OSError as e:
             msg = f"No se pudo deshacer: {e}"
         self.chat.note("↶ " + msg)
+        self.log("Deshacer: " + msg)
         self.explorer.refresh()
         self._persist()
 
@@ -1537,6 +1708,7 @@ class App:
             if self.sidebar_visible:
                 self.cfg["sidebar_w"] = max(160, self.main.sashpos(0))
             self.cfg["sidebar_visible"] = self.sidebar_visible
+            self.logp.save_state()
             estado = self.root.state()
             self.cfg["win_zoomed"] = estado == "zoomed"
             if estado == "normal":         # maximizada o minimizada, la geometría no es la de trabajo: se conserva la anterior
@@ -1547,10 +1719,11 @@ class App:
         self.stop_remote()
         if self._server is not None:
             self._server.stop()
-        try:
-            self.root.after_cancel(self._meter_job)
-        except (tk.TclError, AttributeError):
-            pass
+        for job in ("_meter_job", "_drain_job"):
+            try:
+                self.root.after_cancel(getattr(self, job))
+            except (tk.TclError, AttributeError):
+                pass
         self.root.destroy()
 
 
@@ -1562,7 +1735,7 @@ def main():
         pass
     try:
         # sin identidad propia, la barra de tareas agrupa la ventana bajo pythonw.exe y muestra su ícono, no el nuestro
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DeepSeekChat")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("CodeAgent")
     except Exception:
         pass
     root = tk.Tk()

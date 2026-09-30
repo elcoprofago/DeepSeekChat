@@ -1,4 +1,4 @@
-"""Acceso a la API de DeepSeek y configuración local. Sin dependencias externas.
+"""Acceso a la API de DeepSeek (y a las compatibles con OpenAI) y configuración local. Sin dependencias externas.
 
 Todo lo que no es ventana vive acá, para poder probarlo sin abrir la interfaz.
 """
@@ -46,16 +46,23 @@ class AttachError(ValueError):
 
 # ---------------------------------------------------------------- errores HTTP
 
+LOCAL_WHO = "el modelo local"
+
+
 def _friendly(status, detail, who="DeepSeek"):
-    srv = "de DeepSeek" if who == "DeepSeek" else "del modelo local"      # un 500 de llama-server no es de DeepSeek
+    srv = "del modelo local" if who == LOCAL_WHO else f"de {who}"      # un 500 de llama-server no es de DeepSeek
     base = {
         400: "Pedido inválido",
         401: "API key inválida o vencida",
         402: "Saldo insuficiente",
+        403: "La API key no tiene permiso para esto",
+        404: "No existe (modelo o dirección)",
+        413: "Pedido demasiado grande",
         422: "Parámetro inválido",
-        429: "Demasiados pedidos seguidos",
+        429: "Demasiados pedidos seguidos o cuota agotada",
         500: f"Falla del servidor {srv}",
         503: f"Servidor {srv} sobrecargado",
+        529: f"Servidor {srv} sobrecargado",
     }.get(status, f"Error HTTP {status}")
     return f"{base}: {detail}" if detail else base
 
@@ -90,13 +97,13 @@ def _open(req, timeout, who="DeepSeek"):
         raise ApiError(f"Sin conexión con {who}: {e}")
 
 
-def _get_json(path, key, timeout=30):
-    req = urllib.request.Request(BASE + path, headers={"Authorization": f"Bearer {key}"})
-    with _open(req, timeout) as resp:
+def _get_json(path, key, timeout=30, base=BASE, headers=None, who="DeepSeek"):
+    req = urllib.request.Request(base + path, headers=headers or {"Authorization": f"Bearer {key}"})
+    with _open(req, timeout, who) as resp:
         try:
             return json.loads(resp.read().decode("utf-8"))
         except ValueError:
-            raise ApiError("Respuesta ilegible de DeepSeek")
+            raise ApiError(f"Respuesta ilegible de {who}")
 
 
 # ---------------------------------------------------------------- consultas
@@ -132,7 +139,8 @@ def get_balance(key):
 class ChatStream:
     """Itera eventos ('reasoning'|'content'|'usage'|'tool_calls'|'finish', valor). cancel() lo corta desde otro hilo.
 
-    Sirve igual para DeepSeek y para un servidor local compatible con OpenAI (base=http://127.0.0.1:PUERTO/v1, sin key).
+    Sirve igual para DeepSeek, para OpenAI (who="OpenAI", token_param="max_completion_tokens") y para un servidor local
+    compatible con OpenAI (base=http://127.0.0.1:PUERTO/v1, sin key).
     'tool_calls' llega una sola vez, ya armado, justo antes de 'finish': [{'id', 'type', 'function': {'name', 'arguments'}}].
     """
 
@@ -142,13 +150,13 @@ class ChatStream:
     OPEN_RETRIES = 2
 
     def __init__(self, key, model, messages, effort=None, max_tokens=32768, base=BASE, tools=None, timeout=120,
-                 open_timeout=None, retries=None):
+                 open_timeout=None, retries=None, who=None, remote=None, token_param="max_tokens"):
         body = {
             "model": model,
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "max_tokens": int(max_tokens),
+            token_param: int(max_tokens),
         }
         if effort:
             body["reasoning_effort"] = effort
@@ -157,9 +165,10 @@ class ChatStream:
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        self._who = "DeepSeek" if base == BASE else "el modelo local"
+        if remote is None:
+            remote = base == BASE
+        self._who = who or ("DeepSeek" if base == BASE else LOCAL_WHO)
         self._timeout = timeout
-        remote = base == BASE
         # un modelo local puede tardar minutos en procesar el pedido antes de contestar: ahí no se corta ni se reintenta
         self._open_timeout = open_timeout if open_timeout is not None else (self.OPEN_TIMEOUT if remote else timeout)
         self._retries = retries if retries is not None else (self.OPEN_RETRIES if remote else 0)
@@ -240,26 +249,34 @@ class ChatStream:
         except Exception:
             pass   # detalle interno de http.client: si cambia, queda el timeout corto y se verá en los tests
 
-    def __iter__(self):
-        if self._cancelled:
-            return
+    def _connect(self):
+        """Abre la conexión con los reintentos por falta de cabecera; va avisando con ('notice', …). Devuelve True con
+        self._resp abierta, o False si se canceló. Se usa con `ok = yield from self._connect()`."""
         for intento in range(self._retries + 1):
             try:
                 self._resp = self._open_interruptible()
                 if self._resp is None:      # cancelado mientras se esperaba la cabecera
-                    return
+                    return False
                 break
             except ApiError as e:
                 if self._cancelled:
-                    return
+                    return False
                 if e.timeout and intento < self._retries:
                     yield ("notice", f"{self._who} no respondió en {self._open_timeout} s; reintentando ({intento + 2}/{self._retries + 1})…")
                     continue
                 if e.timeout:
+                    hint = " o cambiá a deepseek-flash" if self._who == "DeepSeek" else ""
                     raise ApiError(f"{self._who} no respondió tras {self._retries + 1} intentos de {self._open_timeout} s. "
-                                   "Probá de nuevo o cambiá a deepseek-flash.")
+                                   f"Probá de nuevo{hint}.")
                 raise
         self._relax_read_timeout()
+        return True
+
+    def __iter__(self):
+        if self._cancelled:
+            return
+        if not (yield from self._connect()):
+            return
         try:
             for raw in self._resp:
                 if self._cancelled:
@@ -279,7 +296,7 @@ class ChatStream:
                     continue
                 if obj.get("error"):
                     err = obj["error"]
-                    raise ApiError(err.get("message", str(err)) if isinstance(err, dict) else str(err))
+                    raise ApiError(f"{self._who}: " + (err.get("message", str(err)) if isinstance(err, dict) else str(err)))
                 if obj.get("usage"):
                     yield ("usage", obj["usage"])
                 for ch in obj.get("choices") or []:
@@ -391,6 +408,14 @@ def portable_root():
     return None
 
 
+# Dónde guarda Config la key de cada proveedor: (cifrada con DPAPI, cifrada con contraseña).
+KEY_FIELDS = {
+    "deepseek": ("api_key_enc", "api_key_pw"),
+    "anthropic": ("anthropic_key_enc", "anthropic_key_pw"),
+    "openai": ("openai_key_enc", "openai_key_pw"),
+}
+
+
 class Config:
     DEFAULTS = {
         "model": "deepseek-v4-pro",
@@ -401,6 +426,10 @@ class Config:
         "max_tokens": 32768,
         "api_key_enc": "",       # DPAPI: atada al usuario de Windows (modo instalado)
         "api_key_pw": "",        # cifrada con contraseña (modo portable); ver secret.py
+        "anthropic_key_enc": "", # lo mismo para la key de Claude (Anthropic)
+        "anthropic_key_pw": "",
+        "openai_key_enc": "",    # y para la de OpenAI
+        "openai_key_pw": "",
         "model_dirs": [],        # carpetas extra donde buscar modelos .gguf
         "llama_server_path": "", # vacío = buscar junto al programa
         "local_ctx": 16384,      # contexto con que se arranca un modelo local
@@ -410,6 +439,10 @@ class Config:
         "sidebar_visible": True,
         "win_geometry": "",      # "ANCHOxALTO+X+Y" de la ventana en estado normal
         "win_zoomed": False,
+        "log_height": 170,       # panel de log (logpanel.py): alto acoplado, minimizado, desacoplado y su ventana
+        "log_minimized": False,
+        "log_detached": False,
+        "log_geometry": "",
         "token_budget": 1000000, # 100% de la barra de consumo acumulado del medidor
         "remote_enabled": False, # acceso desde el celular (remote.py); apagado salvo que el usuario lo encienda
         "remote_port": 8765,
@@ -428,13 +461,14 @@ class Config:
         self.sessions_dir = os.path.join(self.dir, "sessions")
         self.load_warning = ""
         self.data = dict(self.DEFAULTS)
-        self._key = ""            # la key en claro, solo en memoria
+        self._keys = {p: "" for p in KEY_FIELDS}      # las keys en claro, solo en memoria
         self.load()
-        if self.data.get("api_key_enc") and not self.data.get("api_key_pw"):
-            try:
-                self._key = unprotect(self.data["api_key_enc"])
-            except (OSError, ValueError):
-                self._key = ""
+        for p, (enc, pw) in KEY_FIELDS.items():
+            if self.data.get(enc) and not self.data.get(pw):
+                try:
+                    self._keys[p] = unprotect(self.data[enc])
+                except (OSError, ValueError):
+                    self._keys[p] = ""
 
     def load(self):
         if not os.path.exists(self.path):
@@ -473,52 +507,74 @@ class Config:
     def __setitem__(self, k, v):
         self.data[k] = v
 
-    # --- la key: en disco solo cifrada (DPAPI o contraseña); en memoria en claro
+    # --- las keys: en disco solo cifradas (DPAPI o contraseña); en memoria en claro. Una por proveedor
+    # ("deepseek", "anthropic", "openai"); sin proveedor, las funciones hablan de la de DeepSeek (como antes).
 
     @property
     def api_key(self):
-        return self._key
+        return self._keys["deepseek"]
+
+    def key(self, provider="deepseek"):
+        return self._keys.get(provider, "")
+
+    def key_mode_of(self, provider="deepseek"):
+        """'password' | 'dpapi' | 'none' según cómo esté guardada."""
+        enc, pw = KEY_FIELDS[provider]
+        if self.data.get(pw):
+            return "password"
+        return "dpapi" if self.data.get(enc) else "none"
 
     @property
     def key_mode(self):
-        """'password' | 'dpapi' | 'none' según cómo esté guardada."""
-        if self.data.get("api_key_pw"):
-            return "password"
-        return "dpapi" if self.data.get("api_key_enc") else "none"
+        return self.key_mode_of("deepseek")
+
+    def locked(self):
+        """Proveedores con key guardada con contraseña y todavía no desbloqueada en esta sesión."""
+        return [p for p in KEY_FIELDS if self.key_mode_of(p) == "password" and not self._keys[p]]
+
+    def needs_unlock_of(self, provider="deepseek"):
+        return provider in self.locked()
 
     @property
     def needs_unlock(self):
-        return self.key_mode == "password" and not self._key
+        """Hay alguna key bloqueada (de cualquier proveedor)."""
+        return bool(self.locked())
 
     def unlock(self, password):
-        """Descifra la key guardada con contraseña. True si la contraseña era correcta."""
+        """Descifra con esa contraseña todas las keys bloqueadas que abra. True si abrió al menos una (cada key puede
+        tener su propia contraseña: las que no abre quedan bloqueadas)."""
         import secret
-        try:
-            self._key = secret.decrypt(self.data["api_key_pw"], password)
-            return True
-        except secret.WrongPassword:
-            return False
+        ok = False
+        for p in self.locked():
+            try:
+                self._keys[p] = secret.decrypt(self.data[KEY_FIELDS[p][1]], password)
+                ok = True
+            except secret.WrongPassword:
+                pass
+        return ok
 
-    def set_api_key(self, key, password=None):
+    def set_api_key(self, key, password=None, provider="deepseek"):
         """Guarda la key. Con contraseña queda cifrada con ella (portable); sin contraseña, con la DPAPI del usuario
         de Windows, salvo en modo portable, donde se exige contraseña (la DPAPI no sobreviviría a otra PC)."""
         if key and self.portable and not password:
             raise ValueError("En modo portable la key se guarda con contraseña.")
-        self._key = key or ""
-        self.data["api_key_enc"] = self.data["api_key_pw"] = ""
+        enc, pw = KEY_FIELDS[provider]
+        self._keys[provider] = key or ""
+        self.data[enc] = self.data[pw] = ""
         if key and password:
             import secret
-            self.data["api_key_pw"] = secret.encrypt(key, password)
+            self.data[pw] = secret.encrypt(key, password)
         elif key:
-            self.data["api_key_enc"] = protect(key)
+            self.data[enc] = protect(key)
         self.save()
 
-    def set_session_key(self, key):
+    def set_session_key(self, key, provider="deepseek"):
         """La key vale solo mientras el programa está abierto; no se escribe nada en disco."""
-        self._key = key or ""
+        self._keys[provider] = key or ""
 
-    def has_key(self):
-        return bool(self.data.get("api_key_enc") or self.data.get("api_key_pw"))
+    def has_key(self, provider="deepseek"):
+        enc, pw = KEY_FIELDS[provider]
+        return bool(self.data.get(enc) or self.data.get(pw))
 
     @staticmethod
     def mask(key):

@@ -28,6 +28,14 @@ EXCLUIR = ("build_portable.py",)
 APP = os.path.dirname(os.path.abspath(__file__))
 RAIZ = os.path.dirname(APP)
 
+# Lanzadores .bat de la raíz de la carpeta portable. Los escribe build_portable.py y, si faltan, crear_lanzadores():
+# una carpeta armada antes de 1.0.0.8 (cuando la app se llamaba DeepSeek Chat) solo tiene DeepSeekChat.bat/.exe, y
+# actualizar reemplaza app\ y nada más. Los viejos siguen andando: app\DeepSeekChat.pyw queda como puente.
+LANZADOR = "@echo off\r\nstart \"\" \"%~dp0runtime\\pythonw.exe\" -I \"%~dp0app\\CodeAgent.pyw\"\r\n"
+LANZADOR_CONSOLA = ("@echo off\r\n\"%~dp0runtime\\python.exe\" -I \"%~dp0app\\CodeAgent.pyw\"\r\n"
+                    "echo.\r\necho (la aplicacion se cerro; codigo %errorlevel%)\r\npause\r\n")
+LANZADORES = {"CodeAgent.bat": LANZADOR, "CodeAgent-consola.bat": LANZADOR_CONSOLA}
+
 
 def es_archivo_de_app(nombre):
     """True si un archivo de la raíz del repo va a app\\ en la carpeta portable."""
@@ -38,7 +46,7 @@ def es_archivo_de_app(nombre):
 
 def version_txt(v):
     """Primera línea: la que compara selftest.py. Al actualizar solo app\\ hay que reescribirlo también."""
-    return (f"DeepSeek Chat {v}\r\n\r\nVersion de esta carpeta. La que corre de verdad es la del titulo de la "
+    return (f"CodeAgent {v}\r\n\r\nVersion de esta carpeta. La que corre de verdad es la del titulo de la "
             "ventana;\r\nsi no coinciden, Diagnostico.bat lo avisa.\r\n")
 
 
@@ -52,6 +60,18 @@ def ocr_txt(raiz):
 def escribir_version_txt(raiz, v):
     with open(os.path.join(raiz, "VERSION.txt"), "w", encoding="ascii", newline="") as f:
         f.write(version_txt(v) + "\r\n" + ocr_txt(raiz))
+
+
+def crear_lanzadores(raiz):
+    """Crea los .bat de CodeAgent que falten en la raíz portable. Nunca pisa ni borra uno existente. Devuelve los creados."""
+    creados = []
+    for nombre, texto in LANZADORES.items():
+        p = os.path.join(raiz, nombre)
+        if not os.path.exists(p):
+            with open(p, "w", encoding="ascii", newline="") as f:
+                f.write(texto)
+            creados.append(nombre)
+    return creados
 
 
 def clave(v):
@@ -95,7 +115,7 @@ def procesos_de_esta_carpeta():
 
 
 def pedir(url, destino=None):
-    req = urllib.request.Request(url, headers={"User-Agent": "DeepSeekChat-actualizador",
+    req = urllib.request.Request(url, headers={"User-Agent": "CodeAgent-actualizador",
                                                "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=60) as r:
         if destino is None:
@@ -116,7 +136,8 @@ def armar_app_nueva(zip_path, dest, v_esperada):
             with z.open(info) as src, open(os.path.join(dest, partes[1]), "wb") as out:
                 shutil.copyfileobj(src, out)
             n += 1
-    for obligatorio in ("DeepSeekChat.pyw", "deepseek_chat.py", "version.py", "actualizar.py"):
+    # DeepSeekChat.pyw: el puente que abren los DeepSeekChat.exe/.bat de las carpetas armadas antes de 1.0.0.8
+    for obligatorio in ("CodeAgent.pyw", "DeepSeekChat.pyw", "deepseek_chat.py", "version.py", "actualizar.py"):
         if not os.path.isfile(os.path.join(dest, obligatorio)):
             raise RuntimeError(f"la release no trae {obligatorio}: no se instala")
     with open(os.path.join(dest, "version.py"), encoding="utf-8") as f:
@@ -129,7 +150,7 @@ def armar_app_nueva(zip_path, dest, v_esperada):
 
 
 def main():
-    print("DeepSeek Chat - actualizador\n")
+    print("CodeAgent - actualizador\n")
     if not os.path.isfile(os.path.join(RAIZ, "portable.flag")):
         print("Esta no es una carpeta portable (falta portable.flag). No se toca nada.")
         return 1
@@ -144,12 +165,14 @@ def main():
     nueva = str(rel.get("tag_name", "")).lstrip("vV")
     print(f"Última versión publicada: {nueva}")
     if clave(nueva) <= clave(actual):
+        for b in crear_lanzadores(RAIZ):
+            print(f"Creado {b} (el lanzador con el nombre nuevo de la aplicación).")
         print("\nYa tenés la última versión. No hay nada que hacer.")
         return 0
 
     corriendo = procesos_de_esta_carpeta()
     if corriendo:
-        print(f"\nDeepSeek Chat está abierto desde esta carpeta (proceso {', '.join(map(str, corriendo))}).")
+        print(f"\nCodeAgent está abierto desde esta carpeta (proceso {', '.join(map(str, corriendo))}).")
         print("Cerralo y volvé a correr Actualizar.bat.")
         return 1
 
@@ -179,6 +202,8 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\nListo: {actual} -> {nueva} ({n} archivos).")
+    for b in crear_lanzadores(RAIZ):
+        print(f"Creado {b} (el lanzador con el nombre nuevo de la aplicación).")
     print(f"La versión anterior quedó en {os.path.basename(respaldo)} (se puede borrar cuando confirmes que anda).")
     return 0
 

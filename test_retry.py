@@ -77,9 +77,15 @@ s.close()
 
 # ---- 2. se cuelga siempre: error claro tras agotar reintentos
 s = Srv(cuelgues=99)
-ev, err, dt = correr(s, open_timeout=1, retries=2, timeout=10)
+ev, err, dt = correr(s, open_timeout=1, retries=2, timeout=10, who="DeepSeek")
 check("cuelgue permanente: error con timeout agotado y sugerencia", err is not None and "3 intentos" in str(err) and "flash" in str(err), err)
 check("hizo 3 pedidos, no más", s.pedidos == 3, s.pedidos)
+s.close()
+# CONTROL: con otro proveedor no se sugiere un modelo de DeepSeek
+s = Srv(cuelgues=99)
+ev, err, dt = correr(s, open_timeout=1, retries=0, timeout=10, who="OpenAI")
+check("CONTROL: cuelgue con OpenAI nombra a OpenAI y no sugiere deepseek-flash",
+      err is not None and "OpenAI" in str(err) and "flash" not in str(err), err)
 s.close()
 
 # ---- 3. pausa larga tras la cabecera NO se corta con el timeout corto (el modelo razona un rato)

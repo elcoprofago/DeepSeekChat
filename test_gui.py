@@ -476,7 +476,7 @@ shot("03_final.png")
 
 # ---------------------------------------------------------------- título, medidor de tokens, tema oscuro
 check("título de la ventana como el de USBagent, con la versión (y fijo aunque cambie la sesión)",
-      dc.TITULO_VENTANA == f"DeepSeek Chat v{version.VERSION} - \u00a9 R.A. Sistemas - 2026" and root.title() == dc.TITULO_VENTANA, root.title())
+      dc.TITULO_VENTANA == f"CodeAgent v{version.VERSION} - \u00a9 R.A. Sistemas - 2026" and root.title() == dc.TITULO_VENTANA, root.title())
 check("la versión tiene cuatro números", len(version.VERSION.split(".")) == 4 and all(x.isdigit() for x in version.VERSION.split(".")), version.VERSION)
 check("el tema por defecto es el oscuro azul", dsapi.Config.DEFAULTS["theme"] == "oscuro"
       and all(k in theme.THEMES[n] for n in theme.THEMES for k in ("meter_fill", "accent_text")))

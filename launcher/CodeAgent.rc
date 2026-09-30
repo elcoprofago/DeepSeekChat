@@ -12,9 +12,9 @@ BEGIN
     BEGIN
         BLOCK "0c0a04b0"
         BEGIN
-            VALUE "FileDescription", "DeepSeek Chat"
-            VALUE "ProductName", "DeepSeek Chat"
-            VALUE "OriginalFilename", "DeepSeekChat.exe"
+            VALUE "FileDescription", "CodeAgent"
+            VALUE "ProductName", "CodeAgent"
+            VALUE "OriginalFilename", "CodeAgent.exe"
             VALUE "FileVersion", "1.0.0.0"
             VALUE "ProductVersion", "1.0.0.0"
         END

@@ -1,4 +1,4 @@
-"""Diagnóstico: comprueba en ESTA máquina lo que DeepSeek Chat necesita, sin abrir la aplicación.
+"""Diagnóstico: comprueba en ESTA máquina lo que CodeAgent necesita, sin abrir la aplicación.
 
 Se corre con Diagnostico.bat (desde el pendrive, en Windows o en WinPE). Cada línea es OK, AVISO (algo opcional
 no está) o FALLA (la aplicación no va a funcionar bien). Guarda el informe en la carpeta de datos.
@@ -56,7 +56,8 @@ def version_app():
     if os.path.isfile(txt):
         with open(txt, encoding="utf-8", errors="replace") as f:
             dice = f.readline().strip()
-        if dice != f"DeepSeek Chat {v}":
+        # "DeepSeek Chat" es el nombre anterior: lo escribe el Actualizar.bat de 1.0.0.7 al instalar esta versión
+        if dice not in (f"CodeAgent {v}", f"DeepSeek Chat {v}"):
             raise RuntimeError(f"app\\ es {v} pero VERSION.txt dice «{dice}» (se actualizó app\\ sin reescribir VERSION.txt)")
     return v
 

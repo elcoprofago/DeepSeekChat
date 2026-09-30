@@ -44,7 +44,8 @@ def tops():
 
 def find(w, cls, text=None):
     for ch in w.winfo_children():
-        if isinstance(ch, cls) and (text is None or str(ch.cget("text")) == text):
+        # un Combobox también es un ttk.Entry (el selector de proveedor): no es el campo de la key
+        if isinstance(ch, cls) and not isinstance(ch, dc.ttk.Combobox) and (text is None or str(ch.cget("text")) == text):
             return ch
         r = find(ch, cls, text)
         if r:
@@ -60,6 +61,18 @@ dlg = tops()[0]
 entry = find(dlg, dc.ttk.Entry)
 entry.delete(0, "end")
 entry.insert(0, "sk-de-prueba-123")
+
+def find_cb(w):
+    for ch in w.winfo_children():
+        if isinstance(ch, dc.ttk.Combobox) and "Claude" in ch.cget("values"):
+            return ch
+        r = find_cb(ch)
+        if r:
+            return r
+
+
+cb = find_cb(dlg)
+check("premisa: el selector de proveedor arranca en DeepSeek", cb is not None and cb.get() == "DeepSeek", cb and cb.get())
 btn = find(dlg, dc.ttk.Button, "Probar y guardar")
 check("premisa: el botón existe", btn is not None)
 btn.invoke()

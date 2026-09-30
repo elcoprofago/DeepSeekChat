@@ -1,5 +1,5 @@
-/* Lanzador nativo de DeepSeek Chat portable: hace lo mismo que DeepSeekChat.bat
- *     start "" "<carpeta>\runtime\pythonw.exe" -I "<carpeta>\app\DeepSeekChat.pyw"
+/* Lanzador nativo de CodeAgent portable: hace lo mismo que CodeAgent.bat
+ *     start "" "<carpeta>\runtime\pythonw.exe" -I "<carpeta>\app\CodeAgent.pyw"
  * pero es un .exe con el ícono (asterisc.ico) embebido y sin ventana de consola que parpadee.
  *
  * Nativo y con el CRT estático (/MT): no depende de .NET ni del runtime de VC++, así que sirve también donde el .bat
@@ -17,10 +17,10 @@ static void falla(const wchar_t *que, const wchar_t *ruta, DWORD err)
     wchar_t sis[512] = L"", msg[LARGO + 1024];
     if (err)
         FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, err, 0, sis, 512, NULL);
-    _snwprintf(msg, sizeof msg / sizeof msg[0] - 1, L"%s\n\n%s\n\n%s\nSi no se resuelve, probá DeepSeekChat-consola.bat "
+    _snwprintf(msg, sizeof msg / sizeof msg[0] - 1, L"%s\n\n%s\n\n%s\nSi no se resuelve, probá CodeAgent-consola.bat "
                L"o Diagnostico.bat de la misma carpeta.", que, ruta, sis);
     msg[sizeof msg / sizeof msg[0] - 1] = 0;
-    MessageBoxW(NULL, msg, L"DeepSeek Chat", MB_OK | MB_ICONERROR);
+    MessageBoxW(NULL, msg, L"CodeAgent", MB_OK | MB_ICONERROR);
 }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR args, int show)
@@ -35,7 +35,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR args, int show)
     if (barra) *barra = 0;
 
     _snwprintf(py, LARGO, L"%s\\runtime\\pythonw.exe", dir);
-    _snwprintf(app, LARGO, L"%s\\app\\DeepSeekChat.pyw", dir);
+    _snwprintf(app, LARGO, L"%s\\app\\CodeAgent.pyw", dir);
     py[LARGO - 1] = app[LARGO - 1] = 0;
     if (GetFileAttributesW(py) == INVALID_FILE_ATTRIBUTES) {
         falla(L"Falta el Python propio de la carpeta portable (runtime\\). ¿Se copió la carpeta entera?", py, 0);

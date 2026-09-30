@@ -471,7 +471,7 @@ class AppBridge:
         with self._lock:
             items = [self.uploads.get(i) for i in attachments]
         if any(it is None for it in items):
-            return False, ("Un adjunto ya no está en la PC (¿se reinició DeepSeekChat?). Quitalo y volvé a "
+            return False, ("Un adjunto ya no está en la PC (¿se reinició CodeAgent?). Quitalo y volvé a "
                            "adjuntarlo.")
         ok, msg = self.app.call_ui(lambda: self.app.remote_send(text, items))
         if ok:
@@ -524,7 +524,7 @@ PAGE = r"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
-<title>DeepSeek Chat remoto</title>
+<title>CodeAgent remoto</title>
 <style>
 :root{--bg:#14202e;--panel:#1c2d42;--fg:#d4e1f0;--muted:#8aa1bb;--user:#5cb3ff;--bot:#4fd1c5;--final:#8be9fd;
 --acc:#0e639c;--err:#f48771;--bd:#2c4260;--code:#0d1826}
@@ -556,7 +556,7 @@ button:disabled{opacity:.45}
 #login{display:none;padding:24px 14px}
 #login input{width:100%;padding:10px;margin:10px 0;background:var(--code);color:var(--fg);border:1px solid var(--bd);border-radius:8px;font:inherit}
 </style></head><body>
-<header><div id="title">DeepSeek Chat</div><div id="status">conectando…</div></header>
+<header><div id="title">CodeAgent</div><div id="status">conectando…</div></header>
 <div id="login"><div>Pegá el token de acceso (el que muestra la ventana «Remoto» de la PC):</div>
 <input id="tok" autocomplete="off" autocapitalize="off" spellcheck="false"><button id="tokgo">Entrar</button></div>
 <div id="log"></div>
@@ -600,7 +600,7 @@ async function poll(){
   document.querySelectorAll(".live").forEach(x=>x.remove());
   d.items.forEach(add);
   n=d.total;fp=d.fp;sid=d.sid;busy=d.busy;
-  $("title").textContent=d.title||"DeepSeek Chat";
+  $("title").textContent=d.title||"CodeAgent";
   $("status").textContent=d.status||"";
   if(d.live&&(d.live.content||d.live.rlen)){
     log.append(el("div","live",d.live.content?d.live.content:"razonando… ("+d.live.rlen+" caracteres)"))}

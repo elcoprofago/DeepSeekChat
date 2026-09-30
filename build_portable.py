@@ -1,4 +1,4 @@
-"""Arma la carpeta portable de DeepSeek Chat (para copiar a un pendrive).
+"""Arma la carpeta portable de CodeAgent (para copiar a un pendrive).
 
 Uso:   python build_portable.py [--out RUTA] [--llama-bin RUTA] [--tesseract RUTA] [--sin-ucrt] [--sin-exe] [--sin-verificar]
 
@@ -9,9 +9,10 @@ Resultado (por defecto en dist\\DeepSeekChat):
     bin\\tesseract\\  tesseract.exe, sus DLL y solo spa/eng/osd: OCR de las imágenes que llegan desde MovilDeep
     Models\\    aquí van los .gguf (no se toca al rearmar)
     data\\      configuración, sesiones, key cifrada, logs (no se toca al rearmar)
-    DeepSeekChat.exe  lanzador nativo con el ícono (se compila de launcher\\ con las Build Tools de Visual Studio;
+    CodeAgent.exe     lanzador nativo con el ícono (se compila de launcher\\ con las Build Tools de Visual Studio;
                       si no están, se avisa y queda solo el .bat, que hace lo mismo)
-    portable.flag, DeepSeekChat.bat, DeepSeekChat-consola.bat, Diagnostico.bat, LEEME.txt
+    portable.flag, CodeAgent.bat, CodeAgent-consola.bat, Diagnostico.bat, Actualizar.bat, LEEME.txt
+    (DeepSeekChat.exe/.bat de una carpeta armada antes de 1.0.0.8 no se borran: siguen andando por app\\DeepSeekChat.pyw)
     VERSION.txt       qué versión tiene esta carpeta, para saberlo sin abrir la aplicación
 
 Seguridad: app\\, runtime\\ y bin\\ llevan un archivo marcador; solo se reemplazan si lo tienen. Si existe una carpeta
@@ -215,11 +216,11 @@ def find_vcvars():
 
 
 def build_launcher(out):
-    """Compila launcher\\DeepSeekChat.c con el ícono embebido y lo deja como out\\DeepSeekChat.exe. Devuelve True si lo logró."""
+    """Compila launcher\\CodeAgent.c con el ícono embebido y lo deja como out\\CodeAgent.exe. Devuelve True si lo logró."""
     src = os.path.join(HERE, "launcher")
     vcvars = find_vcvars()
     if not vcvars:
-        say("  AVISO: no hay Build Tools de Visual Studio con C++; se arma sin DeepSeekChat.exe (queda DeepSeekChat.bat).")
+        say("  AVISO: no hay Build Tools de Visual Studio con C++; se arma sin CodeAgent.exe (queda CodeAgent.bat).")
         return False
     tmp = os.path.join(out, "launcher.tmp")
     if os.path.exists(tmp):
@@ -231,45 +232,45 @@ def build_launcher(out):
         "@echo off\r\n"
         f'call "{vcvars}" >nul || exit /b 1\r\n'
         f'cd /d "{src}" || exit /b 1\r\n'
-        f'rc /nologo /fo "{tmp}\\DeepSeekChat.res" DeepSeekChat.rc || exit /b 1\r\n'
-        f'cl /nologo /O1 /MT /utf-8 /W3 /D_CRT_SECURE_NO_WARNINGS DeepSeekChat.c "{tmp}\\DeepSeekChat.res" '
-        f'/Fo"{tmp}\\\\" /Fe"{tmp}\\DeepSeekChat.exe" /link /SUBSYSTEM:WINDOWS user32.lib || exit /b 1\r\n'), newline="")
+        f'rc /nologo /fo "{tmp}\\CodeAgent.res" CodeAgent.rc || exit /b 1\r\n'
+        f'cl /nologo /O1 /MT /utf-8 /W3 /D_CRT_SECURE_NO_WARNINGS CodeAgent.c "{tmp}\\CodeAgent.res" '
+        f'/Fo"{tmp}\\\\" /Fe"{tmp}\\CodeAgent.exe" /link /SUBSYSTEM:WINDOWS user32.lib || exit /b 1\r\n'), newline="")
     r = subprocess.run(["cmd", "/d", "/c", script], capture_output=True, text=True, encoding="oem", errors="replace")
-    exe = os.path.join(tmp, "DeepSeekChat.exe")
+    exe = os.path.join(tmp, "CodeAgent.exe")
     if r.returncode != 0 or not os.path.isfile(exe):
-        say(f"  AVISO: no se pudo compilar DeepSeekChat.exe (código {r.returncode}); queda DeepSeekChat.bat.\n"
+        say(f"  AVISO: no se pudo compilar CodeAgent.exe (código {r.returncode}); queda CodeAgent.bat.\n"
             + (r.stdout + r.stderr).strip())
         return False
-    shutil.copy2(exe, os.path.join(out, "DeepSeekChat.exe"))
+    shutil.copy2(exe, os.path.join(out, "CodeAgent.exe"))
     shutil.rmtree(tmp)
-    say(f"  DeepSeekChat.exe: {os.path.getsize(os.path.join(out, 'DeepSeekChat.exe')) // 1024} KB, con el ícono embebido")
+    say(f"  CodeAgent.exe: {os.path.getsize(os.path.join(out, 'CodeAgent.exe')) // 1024} KB, con el ícono embebido")
     return True
 
 
-LAUNCHER = "@echo off\r\nstart \"\" \"%~dp0runtime\\pythonw.exe\" -I \"%~dp0app\\DeepSeekChat.pyw\"\r\n"
-LAUNCHER_CONSOLE = ("@echo off\r\n\"%~dp0runtime\\python.exe\" -I \"%~dp0app\\DeepSeekChat.pyw\"\r\n"
-                    "echo.\r\necho (la aplicacion se cerro; codigo %errorlevel%)\r\npause\r\n")
+LAUNCHER = actualizar.LANZADOR                    # un solo lugar: el actualizador los crea igual si faltan
+LAUNCHER_CONSOLE = actualizar.LANZADOR_CONSOLA
 ACTUALIZAR = ("@echo off\r\ncd /d \"%~dp0\"\r\n\"%~dp0runtime\\python.exe\" -I \"%~dp0app\\actualizar.py\"\r\n"
               "echo.\r\npause\r\n")
 DIAGNOSTICO = ("@echo off\r\n\"%~dp0runtime\\python.exe\" -I \"%~dp0app\\selftest.py\"\r\n"
                "echo.\r\necho El informe quedo en la carpeta data\\diagnostico.txt\r\npause\r\n")
 
-LEEME = """DeepSeek Chat portable
-======================
+LEEME = """CodeAgent portable (antes DeepSeek Chat)
+=========================================
 
-Doble clic en DeepSeekChat.exe (DeepSeekChat.bat hace lo mismo, por si el .exe faltara).
+Doble clic en CodeAgent.exe (CodeAgent.bat hace lo mismo, por si el .exe faltara). Si esta carpeta viene de una
+version anterior, DeepSeekChat.exe y DeepSeekChat.bat siguen abriendo la misma aplicacion.
 La version esta en VERSION.txt y en el titulo de la ventana.
 
 - Todo lo que la aplicacion guarda (configuracion, sesiones, tu API key cifrada, registros) queda en la carpeta data\\
   de esta misma carpeta. No escribe en el equipo donde la enchufes (ni en %APPDATA%).
-- La API key: en modo portable se recomienda guardarla con contrasena (Configuracion). La opcion "atada a este Windows"
+- Las API keys (DeepSeek, Claude, OpenAI): en modo portable se recomienda guardarlas con contrasena (Configuracion). La opcion "atada a este Windows"
   no sirve para llevar la key a otra PC porque el cifrado depende del usuario de Windows.
 - Modelos locales: copia archivos .gguf a la carpeta Models\\ (o a Models\\ en la raiz del pendrive). Aparecen solos en
   el selector de modelos. El motor es bin\\llama-server.exe.
 - OCR: si este portable lo trae (lo dice VERSION.txt), las imagenes que llegan desde la app MovilDeep se leen con
   bin\\tesseract\\ (espanol e ingles). Sin el, las imagenes se guardan pero no se leen.
 - Si algo no arranca: Diagnostico.bat revisa el equipo y guarda un informe en data\\diagnostico.txt.
-  Si la ventana no llega a abrirse, los errores quedan en data\\error.log. DeepSeekChat-consola.bat muestra los errores
+  Si la ventana no llega a abrirse, los errores quedan en data\\error.log. CodeAgent-consola.bat muestra los errores
   en pantalla.
 - Actualizar.bat baja la ultima version publicada en GitHub y reemplaza app\\ (la anterior queda al lado como
   app.respaldo-...). No toca data\\, Models\\, runtime\\ ni bin\\. Hay que cerrar la aplicacion antes.
@@ -301,7 +302,7 @@ def main():
     ap.add_argument("--llama-bin", default="")
     ap.add_argument("--tesseract", default="", help="carpeta de Tesseract (la que tiene tesseract.exe y tessdata\\)")
     ap.add_argument("--sin-ucrt", action="store_true", help="no copiar el UCRT local (Windows 10 y 11 ya lo traen)")
-    ap.add_argument("--sin-exe", action="store_true", help="no compilar el lanzador DeepSeekChat.exe")
+    ap.add_argument("--sin-exe", action="store_true", help="no compilar el lanzador CodeAgent.exe")
     ap.add_argument("--sin-verificar", action="store_true", help="no correr el autodiagnóstico sobre lo armado")
     a = ap.parse_args()
 
@@ -344,8 +345,8 @@ def main():
     if not os.path.exists(readme):
         write_text(readme, MODELS_README, newline="")
     write_text(os.path.join(out, "portable.flag"), "Presente = la aplicacion guarda todo en data\\ y no en %APPDATA%.\r\n", newline="")
-    write_text(os.path.join(out, "DeepSeekChat.bat"), LAUNCHER, newline="")
-    write_text(os.path.join(out, "DeepSeekChat-consola.bat"), LAUNCHER_CONSOLE, newline="")
+    write_text(os.path.join(out, "CodeAgent.bat"), LAUNCHER, newline="")
+    write_text(os.path.join(out, "CodeAgent-consola.bat"), LAUNCHER_CONSOLE, newline="")
     write_text(os.path.join(out, "Diagnostico.bat"), DIAGNOSTICO, newline="")
     write_text(os.path.join(out, "Actualizar.bat"), ACTUALIZAR, newline="")
     write_text(os.path.join(out, "LEEME.txt"), LEEME.replace("\n", "\r\n"), newline="")    # sin newline="" quedaba \r\r\n

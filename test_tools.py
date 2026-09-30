@@ -441,6 +441,25 @@ n_bk = len(os.listdir(bk_o))
 r = tb_o.execute("run_command", {"command": "copy no_existe.bin salida.txt"})
 check("CONTROL: si el comando falla y no toca el destino, no queda entrada en el diario ni copia suelta",
       tb_o.journal == [] and len(os.listdir(bk_o)) == n_bk and "kept a copy" not in r, (r, os.listdir(bk_o)))
+# dos copias del mismo archivo en el mismo segundo y con el mismo largo de diario (deshacer y volver a cambiar):
+# antes la segunda pisaba a la primera. Se fija la hora para que la colisión no dependa de la suerte.
+_real_strftime = at.time.strftime
+at.time.strftime = lambda fmt, *a: "20260101-000000" if fmt == "%Y%m%d-%H%M%S" else _real_strftime(fmt, *a)
+try:
+    mk(os.path.join(ws, "salida.txt"), b"VERSION 1\n")
+    c1 = tb_o._backup(os.path.join(ws, "salida.txt"))
+    mk(os.path.join(ws, "salida.txt"), b"VERSION 2\n")
+    c2 = tb_o._backup(os.path.join(ws, "salida.txt"))
+    s1 = tb_o._save_before_undo(os.path.join(ws, "salida.txt"))
+    s2 = tb_o._save_before_undo(os.path.join(ws, "salida.txt"))
+finally:
+    at.time.strftime = _real_strftime
+check("copias en el mismo segundo: nombres distintos", len({c1, c2}) == 2 and len({s1, s2}) == 2, (c1, c2, s1, s2))
+check("CONTROL: la primera copia sobrevive intacta a la segunda", open(c1, "rb").read() == b"VERSION 1\n"
+      and open(c2, "rb").read() == b"VERSION 2\n", (c1, c2))
+for x in (c1, c2, s1, s2):
+    os.remove(x)
+mk(os.path.join(ws, "salida.txt"), b"lo de antes\n")
 check("CONTROL: un destino fuera de la carpeta no se respalda desde acá",
       tb_o._overwritable("copy calc.py ..\\afuera\\secreto.txt") == [])
 check("CONTROL: un comando sin destinos no genera copias", tb_o.execute("run_command", {"command": "echo hola"}) and tb_o.journal == [])

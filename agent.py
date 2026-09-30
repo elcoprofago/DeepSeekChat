@@ -19,7 +19,7 @@ ARGS_OMITTED = "[texto omitido de una llamada vieja para ahorrar contexto; no es
 LONG_ARG_CHARS = 1000
 # Los últimos pasos con llamadas llegan enteros al modelo mientras haya otra forma de hacer lugar.
 KEEP_RECENT_STEPS = 6
-PLACEHOLDER_ERROR = ("ERROR: this call was not run: an argument is only the placeholder that DeepSeekChat puts in OLD "
+PLACEHOLDER_ERROR = ("ERROR: this call was not run: an argument is only the placeholder that CodeAgent puts in OLD "
                      "history to save context. It is not a real command or text. Write the actual command or text; if you "
                      "need the exact content of a file, read it again with read_file.")
 # Lo que queda en el historial en lugar de argumentos que no son JSON (una respuesta cortada por el límite de tokens).
@@ -86,15 +86,16 @@ def is_placeholder_call(args):
     return any(isinstance(v, str) and v.strip() in (OMITTED, ARGS_OMITTED) for v in (args or {}).values())
 
 
-def api_messages(messages, budget_chars=None):
+def api_messages(messages, budget_chars=None, keep=()):
     """Copia lista para enviar a la API: sin campos privados (_...) y recortada al presupuesto. No toca la lista
     original. Primero se recorta lo viejo, de lo más viejo a lo más nuevo; los últimos KEEP_RECENT_STEPS pasos, solo
     si con eso no alcanza:
       1. resultados de herramientas viejos -> aviso
       2. textos largos (> LONG_ARG_CHARS) de llamadas viejas -> aviso (los comandos quedan enteros)
       3. pasos viejos enteros (llamada + sus resultados) se descartan; los mensajes del usuario nunca
-      4. y 5. lo mismo que 1 y 2 sobre los pasos recientes."""
-    out = [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
+      4. y 5. lo mismo que 1 y 2 sobre los pasos recientes.
+    keep: campos privados que sí viajan ("_blocks": la respuesta cruda de Claude, ver claudeapi)."""
+    out = [{k: v for k, v in m.items() if not k.startswith("_") or k in keep} for m in messages]
     if not budget_chars:
         return out
     size = messages_size(out)
@@ -202,7 +203,8 @@ def repair(messages):
 
 class Agent:
     def __init__(self, make_stream, toolbox=None, max_steps=DEFAULT_MAX_STEPS, budget_chars=600000,
-                 ctx_tokens=None, reserve_tokens=0, overhead_chars=0, chars_per_token=DEFAULT_CHARS_PER_TOKEN, label=None):
+                 ctx_tokens=None, reserve_tokens=0, overhead_chars=0, chars_per_token=DEFAULT_CHARS_PER_TOKEN, label=None,
+                 keep=()):
         """Con ctx_tokens (modelo local) el presupuesto del historial es la ventana menos lo reservado para la
         respuesta (reserve_tokens) y lo que ocupan el prompt de sistema y las herramientas (overhead_chars); si no,
         budget_chars fijo. chars_per_token se recalibra en cada paso y queda en el atributo para la próxima corrida."""
@@ -215,6 +217,7 @@ class Agent:
         self.overhead_chars = overhead_chars
         self.chars_per_token = chars_per_token
         self.label = label      # quién contesta: queda en cada respuesta ("_model"), no se deduce del modelo actual
+        self.keep = tuple(keep)     # campos privados que el proveedor necesita de vuelta (api_messages)
         self._stream = None
 
     def _stamp(self, msg):
@@ -247,10 +250,10 @@ class Agent:
                 return "cancelled"
             emit("step_begin", step)
             tools = self.toolbox.specs if self.toolbox else None
-            sent = api_messages(messages, self.budget())
+            sent = api_messages(messages, self.budget(), self.keep)
             stream = self.make_stream(sent, tools)
             self._stream = stream
-            content, reasoning, calls, finish = "", "", None, None
+            content, reasoning, calls, finish, blocks = "", "", None, None, None
             try:
                 for kind, val in stream:
                     if kind == "content":
@@ -263,6 +266,9 @@ class Agent:
                         finish = val
                     elif kind == "usage":
                         self._calibrate(val, messages_size(sent))
+                    elif kind == "blocks":
+                        blocks = val        # solo para el historial; la pantalla ya recibió el texto
+                        continue
                     emit(kind, val)
             finally:
                 self._stream = None
@@ -278,6 +284,8 @@ class Agent:
                 msg["_reasoning"] = reasoning
             if calls:
                 msg["tool_calls"] = calls
+            if blocks:
+                msg["_blocks"] = blocks
             messages.append(msg)
             emit("step_end", {"content": content, "reasoning": reasoning, "finish": finish, "calls": calls or []})
             if finish == "length":
@@ -333,7 +341,7 @@ class Agent:
                         elif errors[kind] >= SAME_ERROR_WARN:
                             result += ("\n\nNOTE: you got this same error %d times now, with different arguments. "
                                        "Variations of the same call will not fix it. Read the error message above and do what "
-                                       "it says; if it is a restriction of DeepSeekChat (blocked, outside the folder, denied), "
+                                       "it says; if it is a restriction of CodeAgent (blocked, outside the folder, denied), "
                                        "it will not change: explain it to the user instead of trying again." % errors[kind])
                 messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
                 emit("tool_result", c["id"], name, result)

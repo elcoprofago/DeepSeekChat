@@ -5,12 +5,12 @@ THEMES = {
     "claro": dict(bg="#f2f4f7", panel="#ffffff", fg="#1c2733", muted="#66727f", user="#0b5cad",
                   bot="#17743f", code_bg="#eceff3", reason="#8a94a0", accent="#0b5cad",
                   accent_fg="#ffffff", err="#b3261e", border="#d3d9e0", accent_text="#0b5cad", meter_fill="#b6d3f2",
-                  final="#0b7a8f", side="#ffffff"),
+                  final="#0b7a8f", side="#ffffff", chat_bg="#ffffff"),
     # Azul nocturno estilo VSCode: capas de azul (ventana < chat < sesiones/explorador/entrada) y acentos en azul claro / cian.
     "oscuro": dict(bg="#0c1520", panel="#1c2d42", side="#26405e", fg="#d4e1f0", muted="#8aa1bb", user="#5cb3ff",
                    bot="#4fd1c5", code_bg="#0d1826", reason="#7f96b0", accent="#0e639c",
                    accent_fg="#ffffff", err="#f48771", border="#2c4260", accent_text="#6cb6ff", meter_fill="#0e639c",
-                   final="#8be9fd"),
+                   final="#8be9fd", chat_bg="#000000"),      # el chat, en negro: la conversación contrasta con los paneles
 }
 
 

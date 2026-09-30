@@ -11,10 +11,11 @@ from tkinter import filedialog, messagebox, ttk
 import agent_tools as at
 import dsapi
 import localmodels
+import providers
 import qrcodegen
 import version
 
-TITULO = "DeepSeek Chat"
+TITULO = "CodeAgent"
 
 
 def _place(win, app, dx=80, dy=60):
@@ -211,8 +212,10 @@ class UnlockDialog:
         w.resizable(False, False)
         f = ttk.Frame(w, padding=16)
         f.pack()
-        ttk.Label(f, text="La API key está guardada con contraseña.", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        self.title = ttk.Label(f, text="", font=("Segoe UI", 10, "bold"))
+        self.title.pack(anchor="w")
         ttk.Label(f, text="Sin ella solo funcionan los modelos locales.", style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
+        self._retitle()
         self.pw = tk.StringVar()
         self.entry = ttk.Entry(f, textvariable=self.pw, show="•", width=34)
         self.entry.pack(fill="x")
@@ -229,18 +232,39 @@ class UnlockDialog:
         w.grab_set()
         self.entry.focus_set()
 
+    @staticmethod
+    def _names(provs):
+        n = [providers.name_of(p) for p in provs]
+        return n[0] if len(n) == 1 else ", ".join(n[:-1]) + " y " + n[-1]
+
+    def _retitle(self):
+        locked = self.app.cfg.locked()
+        plural = len(locked) > 1
+        self.title.configure(text=f"La{'s' if plural else ''} API key{'s' if plural else ''} de {self._names(locked)} "
+                                  f"est{'án' if plural else 'á'} guardada{'s' if plural else ''} con contraseña.")
+
     def submit(self):
-        if self.app.cfg.unlock(self.pw.get()):
-            self.win.destroy()
+        cfg = self.app.cfg
+        if cfg.unlock(self.pw.get()):
+            self.pw.set("")
             self.app.key_changed()
+            if not cfg.locked():
+                self.win.destroy()
+                return
+            # cada key puede tener su propia contraseña: la ventana sigue abierta para las que faltan
+            self._retitle()
+            self.msg.configure(text=f"Falta la de {self._names(cfg.locked())}: tiene otra contraseña.")
         else:
             self.msg.configure(text="Contraseña incorrecta.")
             self.pw.set("")
 
     def forgot(self):
-        if messagebox.askyesno(TITULO, "La key guardada no se puede recuperar sin la contraseña.\n\n¿Borrarla para poder cargar una nueva? "
-                               "(La key sigue existiendo en tu cuenta de DeepSeek; solo se borra la copia de este programa.)", parent=self.win):
-            self.app.cfg.set_api_key("")
+        locked = self.app.cfg.locked()
+        if messagebox.askyesno(TITULO, f"Una key guardada no se puede recuperar sin su contraseña.\n\n¿Borrar la de {self._names(locked)} "
+                               "para poder cargar una nueva? (La key sigue existiendo en tu cuenta del proveedor; solo se borra "
+                               "la copia de este programa.)", parent=self.win):
+            for p in locked:
+                self.app.cfg.set_api_key("", provider=p)
             self.win.destroy()
             self.app.key_changed()
 
@@ -307,7 +331,7 @@ class SettingsDialog:
         self.tab_key = ttk.Frame(nb, padding=14)
         self.tab_local = ttk.Frame(nb, padding=14)
         self.tab_misc = ttk.Frame(nb, padding=14)
-        nb.add(self.tab_key, text="API key")
+        nb.add(self.tab_key, text="API keys")
         nb.add(self.tab_local, text="Modelos locales")
         nb.add(self.tab_misc, text="Apariencia y avanzado")
         self._build_key()
@@ -320,7 +344,7 @@ class SettingsDialog:
         ttk.Button(bf, text="Guardar opciones", style="Accent.TButton", command=self.save_options).pack(side="right", padx=8)
         self.opt_msg = ttk.Label(outer, text="Los cambios se guardan solos al cerrar esta ventana.", style="Muted.TLabel", wraplength=560, justify="left")
         self.opt_msg.pack(fill="x", pady=(6, 0))
-        ttk.Label(outer, text=f"DeepSeek Chat versión {version.VERSION}", style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(outer, text=f"CodeAgent versión {version.VERSION}", style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
         w.protocol("WM_DELETE_WINDOW", self.close)
         self._snap = self._snapshot()
         _place(w, app)
@@ -357,7 +381,17 @@ class SettingsDialog:
 
     def _build_key(self):
         f, cfg = self.tab_key, self.app.cfg
-        ttk.Label(f, text="API key de DeepSeek", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        head = ttk.Frame(f)
+        head.grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(head, text="API key de", font=("Segoe UI", 10, "bold")).pack(side="left")
+        # por defecto, la del proveedor del modelo en uso
+        self.prov_var = tk.StringVar(value=providers.name_of(self.app._provider() if hasattr(self.app, "_provider") else "deepseek"))
+        self.prov_cb = ttk.Combobox(head, textvariable=self.prov_var, state="readonly", width=12,
+                                    values=[providers.name_of(p) for p in providers.ORDER])
+        self.prov_cb.pack(side="left", padx=(6, 0))
+        self.prov_cb.bind("<<ComboboxSelected>>", lambda e: self._provider_changed())
+        self.prov_hint = ttk.Label(head, text="", style="Muted.TLabel")
+        self.prov_hint.pack(side="left", padx=(10, 0))
         self.key_state = ttk.Label(f, text="", wraplength=520, justify="left")
         self.key_state.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 6))
         self.key_var = tk.StringVar()
@@ -367,7 +401,7 @@ class SettingsDialog:
         ttk.Checkbutton(f, text="Mostrar", variable=self.show_var, command=self._toggle_show).grid(row=3, column=0, sticky="w", pady=4)
 
         ttk.Label(f, text="Dónde guardarla", font=("Segoe UI", 10, "bold")).grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 2))
-        self.mode = tk.StringVar(value="password" if cfg.portable or cfg.key_mode == "password" else "dpapi")
+        self.mode = tk.StringVar(value=self._default_mode())
         r1 = ttk.Radiobutton(f, text="Cifrada con mi usuario de Windows (solo sirve en esta PC)", value="dpapi",
                              variable=self.mode, command=self._mode_changed)
         r1.grid(row=5, column=0, columnspan=3, sticky="w")
@@ -397,6 +431,23 @@ class SettingsDialog:
         self._mode_changed()
         self._refresh_key_state()
 
+    def provider(self):
+        inv = {providers.name_of(p): p for p in providers.ORDER}
+        return inv.get(self.prov_var.get(), "deepseek")
+
+    def _default_mode(self):
+        cfg = self.app.cfg
+        return "password" if cfg.portable or cfg.key_mode_of(self.provider()) == "password" else "dpapi"
+
+    def _provider_changed(self):
+        self.key_var.set("")
+        self.pw1.set("")
+        self.pw2.set("")
+        self.mode.set(self._default_mode())
+        self._mode_changed()
+        self.key_msg.configure(text="")
+        self._refresh_key_state()
+
     def _toggle_show(self):
         self.key_entry.configure(show="" if self.show_var.get() else "•")
 
@@ -408,15 +459,17 @@ class SettingsDialog:
                                      "Mínimo 6 caracteres.") if on else "")
 
     def _refresh_key_state(self):
-        cfg = self.app.cfg
-        m = dsapi.Config.mask(cfg.api_key)
-        if cfg.api_key:
+        cfg, p = self.app.cfg, self.provider()
+        self.prov_hint.configure(text=f"(se consigue en {providers.KEY_HINT[p]})")
+        key = cfg.key(p)
+        m = dsapi.Config.mask(key)
+        if key:
             how = {"password": "guardada con contraseña", "dpapi": "guardada, cifrada con tu usuario de Windows",
-                   "none": "solo en memoria (no está guardada)"}[cfg.key_mode]
+                   "none": "solo en memoria (no está guardada)"}[cfg.key_mode_of(p)]
             self.key_state.configure(text=f"En uso: {m} — {how}.", style="TLabel")
-        elif cfg.needs_unlock:
+        elif cfg.needs_unlock_of(p):
             self.key_state.configure(text="Hay una key guardada con contraseña, todavía bloqueada en esta sesión.", style="TLabel")
-        elif cfg.has_key():
+        elif cfg.has_key(p):
             self.key_state.configure(text="Hay una key guardada pero no se pudo descifrar; cargá una nueva.", style="Err.TLabel")
         else:
             self.key_state.configure(text="No hay key cargada.", style="TLabel")
@@ -438,30 +491,32 @@ class SettingsDialog:
                 self._msg("Las dos contraseñas no coinciden.", error=True)
                 return
         self.btn_test.configure(state="disabled")
-        self._msg("Probando contra DeepSeek…")
+        p = self.provider()
+        self._msg(f"Probando contra {providers.name_of(p)}…")
 
         def work():
             try:
-                res = (dsapi.get_balance(key), None)
+                res = (providers.check_key(p, key), None)
             except dsapi.ApiError as e:
                 res = (None, e)
-            self.app.post(lambda: self._test_done(key, mode, pw, *res))   # si el diálogo se cerró, _drain_ui ignora el TclError
+            self.app.post(lambda: self._test_done(key, mode, pw, *res, provider=p))   # si el diálogo se cerró, _drain_ui ignora el TclError
         threading.Thread(target=work, daemon=True).start()
 
-    def _test_done(self, key, mode, pw, balance, err):
+    def _test_done(self, key, mode, pw, balance, err, provider="deepseek"):
         self.btn_test.configure(state="normal")
+        name = providers.name_of(provider)
         if err is not None:
             self._msg(f"No se guardó. {err}", error=True)
             return
         if not balance["available"]:
-            self._msg("La key es válida pero DeepSeek informa la cuenta como no disponible. No se guardó.", error=True)
+            self._msg(f"La key es válida pero {name} informa la cuenta como no disponible. No se guardó.", error=True)
             return
         cfg = self.app.cfg
         try:
             if mode == "session":
-                cfg.set_session_key(key)
+                cfg.set_session_key(key, provider=provider)
             else:
-                cfg.set_api_key(key, pw if mode == "password" else None)
+                cfg.set_api_key(key, pw if mode == "password" else None, provider=provider)
         except (OSError, ValueError) as e:
             self._msg(f"No se pudo guardar: {e}", error=True)
             return
@@ -469,16 +524,18 @@ class SettingsDialog:
         self.pw1.set("")
         self.pw2.set("")
         self._refresh_key_state()
-        msg = f"Key válida y {'cargada para esta sesión' if mode == 'session' else 'guardada'}. Saldo: {balance['text']}"
-        if mode == "session" and cfg.has_key():
+        info = f"Saldo: {balance['text']}" if provider == "deepseek" else balance["text"]
+        msg = f"Key de {name} válida y {'cargada para esta sesión' if mode == 'session' else 'guardada'}. {info}"
+        if mode == "session" and cfg.has_key(provider):
             # elegir "no guardarla" no borra en silencio una copia guardada antes: se avisa y se deja a "Borrar key"
             msg += "\nOjo: la copia guardada anteriormente sigue en disco; «Borrar key» la elimina."
         self._msg(msg)
         self.app.key_changed()
 
     def clear_key(self):
-        if messagebox.askyesno(TITULO, "¿Borrar la API key guardada?", parent=self.win):
-            self.app.cfg.set_api_key("")
+        p = self.provider()
+        if messagebox.askyesno(TITULO, f"¿Borrar la API key de {providers.name_of(p)}?", parent=self.win):
+            self.app.cfg.set_api_key("", provider=p)
             self._refresh_key_state()
             self._msg("Key borrada.")
             self.app.key_changed()
