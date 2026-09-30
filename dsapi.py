@@ -34,10 +34,11 @@ _LANG_BY_EXT = {
 
 
 class ApiError(Exception):
-    def __init__(self, message, status=None, timeout=False):
+    def __init__(self, message, status=None, timeout=False, detail=""):
         super().__init__(message)
         self.status = status
         self.timeout = timeout   # el servidor no llegó a responder a tiempo (distinto de una respuesta de error)
+        self.detail = detail     # el texto del servidor, sin la explicación de _friendly
 
 
 class AttachError(ValueError):
@@ -79,7 +80,8 @@ def _from_http_error(e, who="DeepSeek"):
             detail = raw
     except Exception:
         pass
-    return ApiError(_friendly(e.code, str(detail).strip()[:400], who), status=e.code)
+    detail = str(detail).strip()[:400]
+    return ApiError(_friendly(e.code, detail, who), status=e.code, detail=detail)
 
 
 def _open(req, timeout, who="DeepSeek"):

@@ -14,9 +14,9 @@ OPENAI_BASE = "https://api.openai.com/v1"
 ORDER = ["deepseek", "anthropic", "openai"]
 NAMES = {"deepseek": "DeepSeek", "anthropic": "Claude", "openai": "OpenAI", "anthropic_admin": "Claude (Admin)"}
 KEY_HINT = {"deepseek": "platform.deepseek.com", "anthropic": "console.anthropic.com", "openai": "platform.openai.com",
-            "anthropic_admin": "la consola de Claude, Admin keys; opcional"}
+            "anthropic_admin": "la consola de Claude, Claves de API → Crear clave con Ámbito «Organización»; opcional, para el gasto del mes"}
 # Una key que no es de un proveedor de modelos: la Admin key de Claude (sk-ant-admin…) solo sirve para leer cuánto se
-# gastó en el mes (claudeapi.month_cost); no manda mensajes. Se carga y guarda como las demás, en Configuración.
+# gastó en el mes (claudeapi.month_summary); no manda mensajes. Se carga y guarda como las demás, en Configuración.
 ADMIN = "anthropic_admin"
 KEY_SLOTS = ORDER + [ADMIN]
 PREFIX = {"anthropic": "anthropic:", "openai": "openai:"}
@@ -57,6 +57,29 @@ def full_id(provider, api_id):
 
 def usd(x):
     return f"US$ {x:,.2f}"
+
+
+def claude_cost_texts(s):
+    """(texto de la barra, texto del log, nivel del log) para un resumen de claudeapi.month_summary."""
+    if s["check"] == "diferencia":
+        return (f"{usd(s['closed'])} gastado hasta ayer · hoy: precios desactualizados (ver log)",
+                f"Gasto de Claude este mes hasta ayer: {usd(s['closed'])}. Lo de hoy NO se suma: calculado con la "
+                f"tabla de precios, ayer da {s['check_calc']:.4f} US$ y el informe de Anthropic dice "
+                f"{s['check_reported']:.4f} US$; hay que actualizar PRICES en claudeapi.py con {claudeapi.PRICES_URL}"
+                + (f" (sin precio: {'; '.join(s['unpriced'])})" if s["unpriced"] else "") + ".", "WARN")
+    bar = f"{usd(s['total'])} gastado este mes (hoy {usd(s['today'])}"
+    log = (f"Gasto de Claude este mes: {usd(s['total'])} = {usd(s['closed'])} de días cerrados + {s['today']:.4f} US$ "
+           f"de hoy (uso por hora × precios de lista)")
+    if s["check"] == "ok":
+        log += f"; precios verificados contra el informe de ayer ({s['check_reported']:.4f} US$)"
+    elif s["check"] == "ayer pendiente":
+        log += f"; ayer ({s['check_calc']:.4f} US$) también calculado: Anthropic todavía no lo informa"
+    else:
+        log += "; sin uso ayer para verificar los precios"
+    if s["unpriced"]:
+        return (bar + " + usos sin precio, ver log)",
+                log + f". NO sumado, sin precio en la tabla: {'; '.join(s['unpriced'])}.", "WARN")
+    return bar + ")", log + ".", "INFO"
 
 
 def name_of(provider):
@@ -118,7 +141,8 @@ def check_key(provider, key):
     if provider == "deepseek":
         return dsapi.get_balance(key)
     if provider == ADMIN:
-        return {"available": True, "text": f"Gastado este mes: {usd(claudeapi.month_cost(key))}"}
+        bar = claude_cost_texts(claudeapi.month_summary(key))[0]
+        return {"available": True, "text": bar[0].upper() + bar[1:]}
     n = len(list_models(provider, key))
     return {"available": True, "text": f"{n} modelo{'s' if n != 1 else ''} disponible{'s' if n != 1 else ''}"}
 

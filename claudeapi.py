@@ -19,7 +19,7 @@ import json
 import re
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import dsapi
 
@@ -69,10 +69,52 @@ def _supported(caps, *path):
 
 
 # El informe de costos de la Admin API (GET /v1/organizations/cost_report): cuánto se gastó, en centavos de dólar
-# como texto decimal, por día. Pide una Admin key (sk-ant-admin…) o una key personal sin workspace; la Admin API no
-# existe para cuentas individuales. El crédito DISPONIBLE (el de la página de facturación) no lo da ninguna API.
+# como texto decimal, por día UTC. Pide una Admin key (sk-ant-admin…) o una key con ámbito «Organización»; la Admin
+# API no existe para cuentas individuales. El crédito DISPONIBLE (el de la página de facturación) no lo da ninguna API.
+# El informe de costos NO trae el día UTC en curso (medido el 30/9/2026: ni pidiéndolo con ending_at); lo de hoy se
+# calcula con el informe de uso por hora (usage_report, ese sí lo trae) y la tabla de precios de abajo.
 BILLING_URL = "https://platform.claude.com/settings/billing"
+PRICES_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
 COST_PAGES = 12          # tope de páginas: un mes son 31 buckets diarios = 1 página; esto solo corta un bucle raro
+BETA_FAST = "fast-mode-2026-02-01"   # sin este encabezado el informe de uso no separa el modo rápido
+
+# US$ por millón de tokens, copiados de PRICES_URL el 30/9/2026: (entrada, salida, lectura de caché como fracción de la
+# entrada). Escritura de caché: 1,25x la entrada (5 min) y 2x (1 h). Un modelo que no esté acá NO se estima: se informa
+# como «sin precio». Si Anthropic cambia un precio, month_summary lo detecta comparando lo calculado para ayer con lo
+# que dice el informe de costos para ayer.
+PRICES = {
+    "claude-fable-5-1": (10, 50, 0.025), "claude-mythos-5-1": (10, 50, 0.025),
+    "claude-fable-5": (10, 50, 0.1), "claude-mythos-5": (10, 50, 0.1),
+    "claude-opus-5-5": (4, 20, 0.05),
+    "claude-opus-5": (5, 25, 0.1), "claude-opus-4-8": (5, 25, 0.1), "claude-opus-4-7": (5, 25, 0.1),
+    "claude-opus-4-6": (5, 25, 0.1), "claude-opus-4-5": (5, 25, 0.1),
+    "claude-opus-4-1": (15, 75, 0.1), "claude-opus-4": (15, 75, 0.1), "claude-opus-4-0": (15, 75, 0.1),
+    "claude-sonnet-5-5": (2, 10, 0.1), "claude-sonnet-5": (2, 10, 0.1),
+    "claude-sonnet-4-6": (3, 15, 0.1), "claude-sonnet-4-5": (3, 15, 0.1),
+    "claude-sonnet-4": (3, 15, 0.1), "claude-sonnet-4-0": (3, 15, 0.1),
+    "claude-haiku-4-5": (1, 5, 0.1), "claude-3-5-haiku": (0.8, 4, 0.1),
+}
+FAST_PRICES = {"claude-opus-5-5": (8, 40), "claude-opus-5": (10, 50), "claude-opus-4-8": (10, 50)}
+# «Claude 4.6 y posteriores»: contexto de 1M a precio normal y recargo de 1,1x con inference_geo "us". Para los
+# anteriores PRICES_URL no publica esos precios: no se estiman.
+MODERN = {"claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5", "claude-opus-5-5",
+          "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5-5",
+          "claude-sonnet-5", "claude-sonnet-4-6"}
+WEB_SEARCH_USD = 0.01    # US$ 10 cada 1.000 búsquedas
+# Campos del informe de uso que se saben cobrar. Uno de tokens que no esté acá (una categoría nueva) no se estima.
+TOKEN_FIELDS = {"uncached_input_tokens", "cache_read_input_tokens", "output_tokens"}
+CACHE_FIELDS = {"ephemeral_5m_input_tokens": 1.25, "ephemeral_1h_input_tokens": 2.0}
+# web_fetch no tiene cargo; code_execution se cobra por hora de contenedor, con 1.550 h gratis por mes por organización
+SERVER_TOOLS = {"web_search_requests", "web_fetch_requests", "code_execution_requests"}
+PRICE_TOLERANCE = 0.01   # US$: diferencia admitida entre lo calculado para ayer y el informe de costos (redondeo)
+
+
+class Unpriced(Exception):
+    """Una fila del informe de uso con algo que la tabla de precios no cubre."""
+
+
+def _day(dt):
+    return dt.strftime("%Y-%m-%dT00:00:00Z")
 
 
 def month_start(now=None):
@@ -81,24 +123,148 @@ def month_start(now=None):
     return now.strftime("%Y-%m-01T00:00:00Z")
 
 
-def month_cost(key, now=None):
-    """Dólares gastados en la organización desde el primer día del mes (UTC), según el informe de costos."""
-    total, page = 0.0, None
+def _admin_get(path, q, key, betas=()):
+    try:
+        return dsapi._get_json(path + "?" + urllib.parse.urlencode(q, doseq=True), key, base=BASE,
+                               headers=headers(key, betas), who=WHO)
+    except dsapi.ApiError as e:
+        if e.status in (401, 403):
+            # la key puede andar bien para chatear: lo que le falta es acceso a la Admin API, no validez
+            raise dsapi.ApiError("La key no tiene acceso al informe de costos"
+                                 + (f": {e.detail}" if e.detail else ""), status=e.status, detail=e.detail)
+        raise
+
+
+def _buckets(path, q, key, betas=()):
+    """Todos los buckets de un informe, siguiendo next_page."""
+    out, page = [], None
     for _ in range(COST_PAGES):
-        q = {"starting_at": month_start(now), "limit": 31}
-        if page:
-            q["page"] = page
-        data = _get("/organizations/cost_report?" + urllib.parse.urlencode(q), key)
-        try:
-            for b in data.get("data") or []:
-                for r in b.get("results") or []:
-                    total += float(r.get("amount") or 0)        # centavos
-        except (TypeError, ValueError, AttributeError):
-            raise dsapi.ApiError("Respuesta ilegible del informe de costos de Claude")
+        data = _admin_get(path, dict(q, page=page) if page else q, key, betas)
+        if not isinstance(data, dict) or not isinstance(data.get("data") or [], list):
+            raise dsapi.ApiError(f"Respuesta ilegible del informe de Claude ({path})")
+        out += data.get("data") or []
         page = data.get("next_page")
         if not data.get("has_more") or not page:
             break
-    return total / 100
+    return out
+
+
+def cost_by_day(key, start, end):
+    """{"AAAA-MM-DD": US$} del informe de costos, días UTC en [start, end)."""
+    days = {}
+    try:
+        for b in _buckets("/organizations/cost_report", {"starting_at": start, "ending_at": end, "limit": 31}, key):
+            day = str(b.get("starting_at") or "")[:10]
+            days[day] = days.get(day, 0.0) + sum(float(r.get("amount") or 0) for r in b.get("results") or []) / 100
+    except (TypeError, ValueError, AttributeError):
+        raise dsapi.ApiError("Respuesta ilegible del informe de costos de Claude")
+    return days
+
+
+def month_cost(key, now=None):
+    """Dólares gastados en la organización desde el primer día del mes (UTC) hasta ayer, según el informe de costos."""
+    now = now or datetime.now(timezone.utc)
+    start, today = month_start(now), _day(now)
+    if start == today:                   # día 1: todavía no hay días cerrados en el mes
+        return 0.0
+    return sum(cost_by_day(key, start, today).values())
+
+
+def _base_model(model):
+    return re.sub(r"-\d{8}$", "", str(model or ""))
+
+
+def row_cost(r):
+    """US$ de una fila del informe de uso. Levanta Unpriced si algo de la fila no tiene precio publicado conocido."""
+    model = _base_model(r.get("model"))
+    if model not in PRICES:
+        raise Unpriced(f"modelo {r.get('model')}")
+    inp, out, read = PRICES[model]
+    tier = r.get("service_tier") or "standard"
+    if tier not in ("standard", "batch"):
+        raise Unpriced(f"nivel de servicio «{tier}» en {model}")
+    speed = r.get("speed") or "standard"
+    if speed == "fast":
+        if model not in FAST_PRICES:
+            raise Unpriced(f"modo rápido en {model}")
+        inp, out = FAST_PRICES[model]
+    elif speed != "standard":
+        raise Unpriced(f"velocidad «{speed}» en {model}")
+    mult = 0.5 if tier == "batch" else 1.0
+    geo = r.get("inference_geo") or "global"
+    if geo == "us" and model in MODERN:
+        mult *= 1.1
+    elif geo not in ("global", "not_available"):
+        raise Unpriced(f"región «{geo}» en {model}")
+    ctx = r.get("context_window") or "0-200k"
+    if ctx != "0-200k" and model not in MODERN:
+        raise Unpriced(f"contexto largo ({ctx}) en {model}")
+    cache = r.get("cache_creation") or {}
+    tools = r.get("server_tool_use") or {}
+    extra = [k for k in r if k.endswith("tokens") and k not in TOKEN_FIELDS and r.get(k)]
+    extra += [k for k in cache if k not in CACHE_FIELDS and cache.get(k)]
+    extra += [k for k in tools if k not in SERVER_TOOLS and tools.get(k)]
+    if extra:
+        raise Unpriced(f"{', '.join(extra)} en {model}")
+    try:
+        tok = (inp * int(r.get("uncached_input_tokens") or 0)
+               + sum(inp * m * int(cache.get(k) or 0) for k, m in CACHE_FIELDS.items())
+               + inp * read * int(r.get("cache_read_input_tokens") or 0)
+               + out * int(r.get("output_tokens") or 0)) / 1e6
+        return tok * mult + WEB_SEARCH_USD * int(tools.get("web_search_requests") or 0)
+    except (TypeError, ValueError):
+        raise Unpriced(f"números ilegibles en {model}")
+
+
+def usage_cost(key, start, end, width):
+    """(US$, [lo que no tiene precio]) del informe de uso entre start y end, con buckets de width ("1h" o "1d")."""
+    q = {"starting_at": start, "ending_at": end, "bucket_width": width, "limit": 24 if width == "1h" else 31,
+         "group_by[]": ["model", "service_tier", "inference_geo", "context_window", "speed"]}
+    total, unpriced = 0.0, []
+    for b in _buckets("/organizations/usage_report/messages", q, key, (BETA_FAST,)):
+        for r in (b.get("results") if isinstance(b, dict) else None) or []:
+            try:
+                total += row_cost(r)
+            except Unpriced as e:
+                if str(e) not in unpriced:
+                    unpriced.append(str(e))
+    return total, unpriced
+
+
+def month_summary(key, now=None):
+    """Gasto del mes en Claude, con el día de hoy incluido.
+
+    Días cerrados: el informe de costos (el dato de Anthropic). Hoy: calculado del informe de uso por hora con PRICES.
+    Ayer se calcula también y se compara con el informe de costos: si difieren, PRICES está desactualizado y lo de hoy
+    NO se suma. Si el informe de costos todavía no trae ayer (0 con uso > 0), ayer se toma calculado.
+    Devuelve {closed, today, total, unpriced, check, check_calc, check_reported}; check es "ok", "diferencia",
+    "sin uso ayer" o "ayer pendiente"."""
+    now = now or datetime.now(timezone.utc)
+    start, today = month_start(now), _day(now)
+    yday = _day(now - timedelta(days=1))
+    if start != today:
+        days = cost_by_day(key, start, today)
+        reported = days.get(yday[:10], 0.0)
+    else:                                # día 1: ayer es del mes anterior, solo sirve para verificar precios
+        days = {}
+        reported = sum(cost_by_day(key, yday, today).values())
+    calc_y, unpriced_y = usage_cost(key, yday, today, "1d")
+    today_usd, unpriced = usage_cost(key, today, now.strftime("%Y-%m-%dT%H:%M:%SZ"), "1h")
+    closed = sum(days.values())
+    if calc_y == 0 and reported == 0 and not unpriced_y:
+        check = "sin uso ayer"
+    elif reported == 0:
+        check = "ayer pendiente"
+        if start != today:
+            closed += calc_y             # el informe de costos todavía no cerró ayer: se usa lo calculado
+            unpriced += [u for u in unpriced_y if u not in unpriced]
+    elif unpriced_y or abs(calc_y - reported) > PRICE_TOLERANCE:
+        check = "diferencia"
+    else:
+        check = "ok"
+    total = closed + (0.0 if check == "diferencia" else today_usd)
+    return {"closed": closed, "today": today_usd, "total": total, "unpriced": unpriced, "check": check,
+            "check_calc": calc_y, "check_reported": reported}
 
 
 def list_models(key):

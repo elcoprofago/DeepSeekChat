@@ -24,7 +24,7 @@ def check(nombre, cond, detalle=""):
 
 dsapi.list_models = lambda key: dsapi.FALLBACK_MODELS
 dsapi.get_balance = lambda key: {"available": True, "text": "US$ 1.00"}
-claudeapi.month_cost = lambda key, now=None: 1.0      # sin red: el gasto de Claude también simulado
+claudeapi.month_summary = lambda key, now=None: {"closed": 0.0, "today": 1.0, "total": 1.0, "unpriced": [], "check": "ok", "check_calc": 1.0, "check_reported": 1.0}  # sin red: el gasto de Claude también simulado
 probadas = []
 
 

@@ -147,7 +147,7 @@ class App:
         self._last_notice = ""
         self.last_usage = None
         self.balance_text = "—"
-        self.claude_cost_text = ""       # gasto del mes en Claude (claudeapi.month_cost), para la barra de estado
+        self.claude_cost_text = ""       # gasto del mes en Claude (claudeapi.month_summary), para la barra de estado
         self._claude_cost_t = 0.0        # cuándo se consultó por última vez
         self._claude_cost_denied = ""    # key común que ya contestó «sin permiso»: no se la vuelve a probar sola
         self._suppress_select = False
@@ -1104,23 +1104,26 @@ class App:
 
         def work():
             try:
-                res = (claudeapi.month_cost(key), None)
+                res = (claudeapi.month_summary(key), None)
             except dsapi.ApiError as e:
                 res = (None, e)
             self.post(lambda: self._claude_cost_loaded(key, bool(admin), *res))
         threading.Thread(target=work, daemon=True).start()
 
-    def _claude_cost_loaded(self, key, admin, usd, err):
+    def _claude_cost_loaded(self, key, admin, summary, err):
         if err is None:
             self._claude_cost_denied = ""
-            self.claude_cost_text = f"{providers.usd(usd)} gastado este mes"
-            self.log(f"Gasto de Claude este mes: {providers.usd(usd)} (informe de costos; el disponible solo figura "
-                     f"en {claudeapi.BILLING_URL}).")
+            self.claude_cost_text, msg, level = providers.claude_cost_texts(summary)
+            self.log(f"{msg} El disponible solo figura en {claudeapi.BILLING_URL}.", level)
         elif not admin and getattr(err, "status", None) in (401, 403, 404):
             self._claude_cost_denied = key
-            self.claude_cost_text = "gasto: hace falta una Admin key"
-            self.log("La key de Claude no puede leer el informe de costos: para ver el gasto del mes cargá una Admin "
-                     "key en Configuración → «Claude (Admin)» (las cuentas individuales no tienen Admin API).", "WARN")
+            self.claude_cost_text = "gasto: no disponible por API"
+            self.log(f"La key de Claude no puede leer el informe de costos ({err}). Ese informe pide una key "
+                     "con ámbito «Organización» (Consola → Claves de API → Crear clave → Ámbito: Organización; "
+                     "la cuenta tiene que ser de organización, no individual) o una Admin key "
+                     "(sk-ant-admin01-…); cualquiera de las dos va en Configuración → «Claude (Admin)». "
+                     "El saldo de créditos no lo da ninguna API: se ve en "
+                     f"{claudeapi.BILLING_URL} (clic en el saldo de la barra).", "WARN")
         else:
             self.claude_cost_text = "gasto: error"
             self.log(f"Gasto de Claude: {err}", "ERROR")
