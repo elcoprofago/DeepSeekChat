@@ -149,8 +149,16 @@ class RemoteDialog:
         self.btn_copy.pack(side="left")
         self.btn_regen = ttk.Button(bf, text="Generar token nuevo", command=self.regen)
         self.btn_regen.pack(side="left", padx=8)
+        self.btn_diag = ttk.Button(bf, text="Diagnóstico de conexión", command=self.diagnose)
+        self.btn_diag.pack(side="left", padx=8)
         self.msg = ttk.Label(f, text="", wraplength=520, justify="left")
         self.msg.pack(anchor="w", pady=(8, 0))
+        self.diag_box = _text(f, t, height=7, width=66, wrap="word", state="disabled")
+        self.diag_box.tag_configure("OK", foreground=t["bot"])
+        self.diag_box.tag_configure("FALLA", foreground=t["err"])
+        self.diag_box.tag_configure("AVISO", foreground=t.get("accent_text", t["fg"]))
+        self.diag_box.tag_configure("INFO", foreground=t["muted"])
+        # oculto hasta la primera vez que se pide el diagnóstico, para no ocupar lugar de arranque
         self.qr_img = None
         self.qr_lbl = tk.Label(f, bd=0, bg=t["bg"])     # el QR de MovilDeep; vacío con el servidor apagado
         self.qr_lbl.pack(anchor="center", pady=(8, 0))
@@ -197,6 +205,42 @@ class RemoteDialog:
         ok, msg = self.app.regenerate_remote_token()
         self._say("Token nuevo generado: el enlace anterior ya no sirve." if ok else msg, error=not ok)
         self.refresh()
+
+    def diagnose(self):
+        """Corre las pruebas de conexión (puerto, firewall, perfil de red, Tailscale) en un hilo aparte: alguna
+        llama a PowerShell y puede tardar un par de segundos."""
+        srv = self.app.remote_srv
+        if srv is None:
+            self._say("Encendé el acceso remoto primero: el diagnóstico necesita el servidor corriendo.", error=True)
+            return
+        self.btn_diag.configure(state="disabled")
+        self.diag_box.pack(fill="x", pady=(8, 0), before=self.qr_lbl)
+        self._set_diag([("INFO", "Probando…")])
+        port, token = srv.port, srv.token
+
+        def work():
+            import remote
+            try:
+                resultado = remote.diagnose(port, token)
+            except Exception as e:      # noqa: BLE001 — el diagnóstico no debería poder romper la ventana
+                resultado = [("FALLA", f"El diagnóstico falló: {e}")]
+            self.app.post(lambda: self._diag_done(resultado))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_diag(self, filas):
+        self.diag_box.configure(state="normal")
+        self.diag_box.delete("1.0", "end")
+        for nivel, texto in filas:
+            self.diag_box.insert("end", f"{nivel:<6}", nivel)
+            self.diag_box.insert("end", f" {texto}\n")
+        self.diag_box.configure(state="disabled")
+
+    def _diag_done(self, filas):
+        try:
+            self.btn_diag.configure(state="normal")
+        except tk.TclError:
+            return                      # el diálogo se cerró mientras corría
+        self._set_diag(filas)
 
 
 # ---------------------------------------------------------------- desbloquear la key guardada con contraseña

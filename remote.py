@@ -22,6 +22,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -92,6 +93,141 @@ def qr_payload(lan, ts, port, token):
     """Lo que lleva el QR de emparejamiento de MovilDeep: primero la IP local y, si hay, la de Tailscale."""
     hosts = [lan] + ([ts] if ts and ts != lan else [])
     return QR_PREFIX + json.dumps({"v": 1, "hosts": hosts, "port": port, "token": token}, separators=(",", ":"))
+
+
+# ---------------------------------------------------------------- diagnóstico de conexión
+#
+# Pensado para el caso real: Tailscale conecta pero la misma Wi-Fi no (o al revés). Cada paso es independiente y no
+# tira si uno falla; cada uno devuelve (nivel, texto), nivel en "OK" | "AVISO" | "FALLA". Nada de esto necesita admin.
+
+DIAG_TIMEOUT = 5
+
+
+def _run(args, timeout=DIAG_TIMEOUT):
+    """Corre un comando de diagnóstico (ya instalado en Windows) y devuelve su salida, o None si no se pudo correr.
+    netsh en una Windows en español contesta en CP850/CP1252, no UTF-8: se captura en bytes y se decodifica a mano
+    (texto=True con la codificación por defecto rompe un hilo interno de subprocess y devuelve una salida vacía)."""
+    import subprocess
+    try:
+        r = subprocess.run(args, capture_output=True, timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    raw = (r.stdout or b"") + (r.stderr or b"")
+    for enc in ("utf-8", "cp850", "cp1252"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+def _diag_server(port):
+    """¿Hay algo escuchando en el puerto, en esta PC? No distingue si es CodeAgent u otra cosa."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(2)
+    try:
+        s.connect(("127.0.0.1", port))
+        return "OK", f"El puerto {port} responde en esta PC (localhost)."
+    except OSError as e:
+        return "FALLA", f"Nada escucha en el puerto {port} en esta PC: {e}. ¿Está encendido el acceso remoto?"
+    finally:
+        s.close()
+
+
+def _diag_self_connect(ip, port, token):
+    """Pide /api/info a la IP de la Wi-Fi (no localhost), como lo haría el celular. Si falla, puede ser el firewall,
+    pero Windows a veces enruta una conexión a la propia IP por loopback interno, sin pasar por el firewall real: un
+    OK acá no garantiza que un CELULAR pueda entrar, pero una FALLA sí ubica el problema en el servidor o en la IP."""
+    if not ip or ip == "127.0.0.1":
+        return "AVISO", "No se pudo determinar la IP de esta PC en la red; no se pudo probar."
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(f"http://{ip}:{port}/api/info", headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=4) as r:
+            r.read()
+        return "OK", f"{ip}:{port}/api/info respondió (prueba hecha desde esta misma PC; no reemplaza probar desde el celular)."
+    except urllib.error.HTTPError as e:
+        return ("OK" if e.code == 401 else "AVISO", f"{ip}:{port} respondió con HTTP {e.code}.")
+    except urllib.error.URLError as e:
+        return "FALLA", f"No se pudo conectar a {ip}:{port}: {e.reason}. Revisá el firewall y el perfil de red."
+    except OSError as e:
+        return "FALLA", f"No se pudo conectar a {ip}:{port}: {e}."
+
+
+_PS = ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
+
+
+def _run_ps(script, timeout=20):
+    """netsh devuelve texto localizado (en una Windows en español, "Dentro"/"Sí" en vez de "Inbound"/"True"): no sirve
+    para comparar en el código. Los valores de PowerShell (enums de .NET) no se traducen, así que se usa eso."""
+    return _run(_PS + [script], timeout=timeout)
+
+
+def _diag_network_profile():
+    """Categoría de red de cada adaptador activo (Private/Public/DomainAuthenticated, en inglés siempre: son enums
+    de .NET, no texto traducido). El acceso remoto solo entra por una red Private o de Dominio."""
+    out = _run_ps("Get-NetConnectionProfile | ForEach-Object { $_.InterfaceAlias + '|' + $_.NetworkCategory }")
+    if out is None:
+        return "AVISO", "No se pudo consultar el perfil de red (PowerShell no disponible)."
+    filas = [l.split("|", 1) for l in out.strip().splitlines() if "|" in l]
+    if not filas:
+        return "AVISO", "No se pudo determinar el perfil de red activo."
+    buenas = [a for a, cat in filas if cat.strip() in ("Private", "DomainAuthenticated")]
+    detalle = "; ".join(f"{a.strip()}: {cat.strip()}" for a, cat in filas)
+    if buenas:
+        return "OK", f"Hay una red reconocida como privada o de dominio ({', '.join(buenas)}). Perfiles: {detalle}."
+    return ("FALLA", f"Ninguna red está reconocida como privada: {detalle}. Windows bloquea conexiones entrantes por "
+            "defecto en una red Pública, aunque Python esté permitido para «red privada». Cambiá el tipo de red en "
+            "Configuración > Red e Internet > (tu red) > Perfil de red.")
+
+
+def _diag_firewall(exe):
+    """Si hay una regla de entrada habilitada para este ejecutable (python.exe / pythonw.exe), en cualquier perfil."""
+    nombre = os.path.basename(exe or "")
+    if not nombre:
+        return "AVISO", "No se pudo determinar el ejecutable de Python en uso."
+    script = (f"Get-NetFirewallApplicationFilter | Where-Object {{ $_.Program -like '*{nombre}' }} | "
+              "ForEach-Object { $r = $_ | Get-NetFirewallRule -ErrorAction SilentlyContinue; if ($r) { "
+              "$r.Direction.ToString() + '|' + $r.Enabled.ToString() + '|' + $r.Action.ToString() } }")
+    out = _run_ps(script)
+    if out is None:
+        return "AVISO", "No se pudo consultar el firewall (PowerShell no disponible; hace falta ejecutarlo como administrador en algunas versiones)."
+    ok = any(p.strip() == "True" and d.strip() == "Inbound" and a.strip() == "Allow"
+             for d, p, a in (l.split("|") for l in out.strip().splitlines() if l.count("|") == 2))
+    if ok:
+        return "OK", f"Hay una regla de firewall de entrada habilitada para {nombre}."
+    return ("FALLA", f"No se encontró una regla de firewall de entrada habilitada para {nombre}. La primera vez que se "
+            "enciende el acceso remoto, Windows pregunta si permitir la conexión: hay que aceptar para «red privada». "
+            "Si no apareció el aviso o se lo rechazó por error, se puede agregar a mano en Firewall de Windows Defender "
+            "> Configuración avanzada > Reglas de entrada.")
+
+
+def _diag_tailscale():
+    """IP de Tailscale en esta PC, y si el servicio contesta 'status' (puede no estar en el PATH: se prueba igual)."""
+    ip = tailscale_ip()
+    if not ip:
+        return "AVISO", "Esta PC no tiene una IP de Tailscale asignada (Tailscale apagado, no instalado, o sin iniciar sesión)."
+    out = _run(["tailscale", "status"]) or _run([r"C:\Program Files\Tailscale\tailscale.exe", "status"])
+    if out is None:
+        return "OK", f"Esta PC tiene IP de Tailscale ({ip}), pero no se pudo correr «tailscale status» para ver a los demás equipos."
+    if "offline" in out.lower() and ip not in out:
+        return "AVISO", f"Esta PC tiene IP de Tailscale ({ip}) pero el estado no es claro:\n{out.strip()[:500]}"
+    return "OK", f"Tailscale activo con IP {ip}."
+
+
+def diagnose(port, token, lan=None):
+    """Lista de (nivel, texto) con el resultado de cada prueba, pensada para mostrarse tal cual en la UI."""
+    import sys
+    lan = lan if lan is not None else lan_ip()
+    out = [("INFO", f"IP de esta PC en la red local: {lan}")]
+    out.append(_diag_server(port))
+    out.append(_diag_self_connect(lan, port, token))
+    out.append(_diag_network_profile())
+    out.append(_diag_firewall(sys.executable))
+    out.append(_diag_tailscale())
+    return out
 
 
 # ---------------------------------------------------------------- adjuntos subidos desde el celular
