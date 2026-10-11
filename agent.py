@@ -34,7 +34,7 @@ REPEAT_ABORT = 5
 SAME_ERROR_WARN = 3
 SAME_ERROR_ABORT = 8
 ERROR_PREFIXES = ("ERROR", "BLOCKED", "DENIED")
-DEFAULT_MAX_STEPS = 60
+DEFAULT_MAX_STEPS = 120
 # Modelos locales: el presupuesto de historial sale de la ventana de contexto real, no de un número fijo de caracteres.
 # Caracteres por token de arranque (a propósito bajo: sobra lugar), recalibrado con los prompt_tokens de cada respuesta.
 DEFAULT_CHARS_PER_TOKEN = 2.5

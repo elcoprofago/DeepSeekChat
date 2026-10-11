@@ -237,8 +237,8 @@ n = agent.repair(h)
 check("repair: resultado ajeno se descarta y el faltante se repone", agent.validate(h) == [] and n == 2 and not any(m.get("tool_call_id") == "c7" for m in h), (n, h))
 
 # ---- 12. la guarda de repeticiones se reinicia cuando algo cambió de verdad
-check("tope de pasos por defecto: 60 (el de antes, 30, cortaba tareas normales)",
-      agent.DEFAULT_MAX_STEPS == 60 and agent.Agent(None).max_steps == 60)
+check("tope de pasos por defecto: 120 (30 y después 60 cortaban tareas normales)",
+      agent.DEFAULT_MAX_STEPS == 120 and agent.Agent(None).max_steps == 120)
 rd = lambda i: [("tool_calls", [call(f"r{i}", "read_file", {"path": "a.txt"})]), ("finish", "tool_calls")]
 wr = [("tool_calls", [call("w1", "write_file", {"path": "b.txt", "content": "nuevo\n"})]), ("finish", "tool_calls")]
 fin = [("content", "listo"), ("finish", "stop")]
