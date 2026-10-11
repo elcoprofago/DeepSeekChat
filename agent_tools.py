@@ -507,11 +507,21 @@ def msvc_bin_dir():
 
 
 def _parse_offset(v):
-    """Desplazamiento como entero o texto ('0x3C', '60'): los modelos escriben los dos."""
-    try:
-        n = v if isinstance(v, int) else int(str(v).strip(), 0)
-    except ValueError:
-        raise ToolError(f"offset '{v}' is not a number (use 60 or 0x3C)")
+    """Desplazamiento como entero o texto ('0x3C', '60', y '3C' si lleva letras hexa): los modelos escriben los tres.
+    Un hexa sin prefijo (786B0, 7EC60) se acepta solo si tiene alguna letra a-f, así un decimal pelado ('100') sigue
+    siendo decimal y no cambia de significado. Caso real (sesión Crack Batery 3): el modelo venía leyendo el .exe en
+    hexa y pasaba el offset sin 0x; cada rechazo era otro intento perdido."""
+    if isinstance(v, int):
+        n = v
+    else:
+        s = str(v).strip()
+        try:
+            n = int(s, 0)
+        except ValueError:
+            if re.fullmatch(r"[0-9a-fA-F]+", s) and re.search(r"[a-fA-F]", s):
+                n = int(s, 16)
+            else:
+                raise ToolError(f"offset '{v}' is not a number (use 60, 0x3C or 3C)")
     if n < 0:
         raise ToolError("offset must not be negative")
     return n

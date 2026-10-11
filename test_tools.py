@@ -482,6 +482,15 @@ r = ex("hex_dump", {"path": "prog.bin", "offset": "0x40", "length": 4})
 check("hex_dump muestra los bytes pedidos", "00000040  74 05 90 90" in r, r)
 check("hex_dump no lee fuera de la carpeta", ex("hex_dump", {"path": os.path.join(outside, "secreto.txt")}).startswith("ERROR"))
 check("hex_dump: desplazamiento pasado el final es error claro", ex("hex_dump", {"path": "prog.bin", "offset": 9999}).startswith("ERROR"))
+check("hex_dump acepta un hexa sin prefijo si lleva letras ('4A' -> 0x4A)",
+      "0000004A" in ex("hex_dump", {"path": "prog.bin", "offset": "4A", "length": 2}),
+      ex("hex_dump", {"path": "prog.bin", "offset": "4A", "length": 2})[:40])
+check("hex_dump: '40' sin letras sigue siendo decimal (byte 40 = 0x28), no 0x40",
+      ex("hex_dump", {"path": "prog.bin", "offset": "40", "length": 4}).startswith("[prog.bin: bytes 0x28"),
+      ex("hex_dump", {"path": "prog.bin", "offset": "40", "length": 4})[:40])
+check("hex_dump: un offset que no es número da el error con los tres formatos",
+      "use 60, 0x3C or 3C" in ex("hex_dump", {"path": "prog.bin", "offset": "xyz"}),
+      ex("hex_dump", {"path": "prog.bin", "offset": "xyz"}))
 r = ex("find_bytes", {"path": "prog.bin", "pattern": "74 05"})
 check("find_bytes encuentra bytes en hex", "0x00000040" in r and "1 match" in r, r)
 r = ex("find_bytes", {"path": "prog.bin", "pattern": "Hola", "text": True})

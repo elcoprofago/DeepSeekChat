@@ -33,6 +33,12 @@ REPEAT_ABORT = 5
 # rutas y comillas nuevas, sin leer nunca el error. Se compara el error sin lo que va entre comillas ni los números.
 SAME_ERROR_WARN = 3
 SAME_ERROR_ABORT = 8
+# Copiar el aviso de compactación como argumento nunca es legítimo y reintentarlo nunca se arregla solo. A diferencia de
+# una llamada repetida, no gana nada con los cupos generosos de arriba ni con que una escritura exitosa reinicie la
+# cuenta: lleva su propio contador, que no se reinicia en toda la corrida, y corta antes. Caso real (sesión Crack Batery
+# 3, 2026-10-11): el modelo local reenvió el placeholder como contenido 22 veces, oscilando con pasos que salían bien y
+# reiniciaban los otros contadores, así que el corte por bucle nunca se afirmaba y el usuario veía parar y seguir sin fin.
+PLACEHOLDER_ABORT = 3
 ERROR_PREFIXES = ("ERROR", "BLOCKED", "DENIED")
 DEFAULT_MAX_STEPS = 120
 # Modelos locales: el presupuesto de historial sale de la ventana de contexto real, no de un número fijo de caracteres.
@@ -244,7 +250,7 @@ class Agent:
     def run(self, messages, emit, cancel):
         """Avanza hasta la respuesta final. Devuelve 'done', 'cancelled', 'max_steps' o 'loop'. Los errores de red
         (ApiError) se propagan: los mensajes quedan bien formados hasta el último paso completo."""
-        seen, errors = {}, {}
+        seen, errors, placeholders = {}, {}, 0
         for step in range(1, self.max_steps + 1):
             if cancel.is_set():
                 return "cancelled"
@@ -325,7 +331,13 @@ class Agent:
                             result = ("ERROR: you already made this exact call %d times. Stop repeating it: answer the user "
                                       "with what you know, or try a different approach." % (seen[key] - 1))
                         elif is_placeholder_call(args):
+                            placeholders += 1
                             result = PLACEHOLDER_ERROR
+                            if placeholders >= PLACEHOLDER_ABORT:
+                                aborted = True
+                                result += ("\n\nStopped: you copied the compaction placeholder %d times. It is never "
+                                           "real content. Tell the user what you were trying to write, and that you need "
+                                           "to read the file again first to get its actual text." % placeholders)
                         else:
                             result = self.toolbox.execute(name, args, cancel)
                             if name in STATE_CHANGING and not result.startswith(ERROR_PREFIXES):

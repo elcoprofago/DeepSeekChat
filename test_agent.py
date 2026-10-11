@@ -386,6 +386,16 @@ for nombre, args in [("run_command", {"command": agent.OMITTED}), ("run_command"
     check(f"aviso copiado en {nombre}: no se ejecuta y se explica", m[2]["content"] == agent.PLACEHOLDER_ERROR, m[2]["content"][:80])
 check("aviso copiado: a.txt intacto y nuevo.txt no se creó",
       open(os.path.join(ws, "a.txt")).read() == "uno dos tres\n" and not os.path.exists(os.path.join(ws, "nuevo.txt")))
+# aviso copiado una y otra vez: su propio contador corta como bucle, aunque escrituras exitosas reinicien los otros
+pasos = []
+for i in range(agent.PLACEHOLDER_ABORT):
+    pasos.append([("tool_calls", [call("ok%d" % i, "write_file", {"path": "real%d.txt" % i, "content": "hola"})]), ("finish", "tool_calls")])
+    pasos.append([("tool_calls", [call("ph%d" % i, "write_file", {"path": "x.txt", "content": agent.ARGS_OMITTED})]), ("finish", "tool_calls")])
+st, m, ev, f = run(pasos + [fin])
+phres = [x["content"] for x in m if x["role"] == "tool" and x["content"].startswith(agent.PLACEHOLDER_ERROR)]
+check("aviso copiado: al %d.º se corta como bucle aunque entre medio haya escrituras que salen bien" % agent.PLACEHOLDER_ABORT,
+      st == "loop" and len(phres) == agent.PLACEHOLDER_ABORT and "Stopped" in phres[-1]
+      and "Stopped" not in "".join(phres[:-1]) and agent.validate(m) == [], (st, len(phres)))
 doc = "Si ves " + agent.ARGS_OMITTED + " en el historial, releé el archivo.\n"
 st, m, ev, f = run([[("tool_calls", [call("p2", "write_file", {"path": "doc.txt", "content": doc})]), ("finish", "tool_calls")], fin])
 check("CONTROL: un texto que solo menciona el aviso se escribe normalmente",

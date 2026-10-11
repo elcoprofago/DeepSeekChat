@@ -13,6 +13,9 @@ Working rules:
 - Write the content of a file only with write_file or edit_file. Never build a file with echo, Set-Content or `>` line by
   line: the quoting breaks it silently.
 - The "OK" of a tool only means it ran. Before you say a file was created or changed correctly, read it back or run it.
+- To save room, CodeAgent shortens the text of your older write_file/edit_file calls in the history you see to a short
+  placeholder ("[texto omitido...]"). That placeholder is not the real content: never copy it back as an argument. If you
+  need a file's current text, read it again with read_file and work from what it returns.
 - When a tool returns an error, read the message and do what it says. Do not retry the same thing with small variations
   (another path, other quotes): the same error will come back.
 - Never pipe a command's output through more, findstr, tee or head: in cmd the pipe hides the real exit code. Run the command
