@@ -158,6 +158,12 @@ r = ex("edit_file", {"path": "salida16.txt", "old": "uno", "new": "UNO"})
 raw16 = open(os.path.join(ws, "salida16.txt"), "rb").read()
 check("edit_file sobre UTF-16 conserva la codificación, el BOM y el fin de línea",
       raw16.startswith(b"\xff\xfe") and raw16.decode("utf-16") == "medición UNO\r\nsegunda línea\r\n", (r, raw16[:12]))
+# archivo viejo en cp1252 reescrito con contenido que no entra en cp1252 (emojis): no revienta, cae a UTF-8
+mk(os.path.join(ws, "viejo.md"), "café y té\n".encode("cp1252"))   # como lo deja la redirección `>` de cmd
+r = ex("write_file", {"path": "viejo.md", "content": "# 📊 informe\ncafé ☕ y té\n"})
+raw_md = open(os.path.join(ws, "viejo.md"), "rb").read()
+check("write_file con emojis sobre un archivo cp1252 no da UnicodeEncodeError: reescribe en UTF-8",
+      r.startswith("OK") and raw_md.decode("utf-8") == "# 📊 informe\ncafé ☕ y té\n", (r, raw_md[:20]))
 
 # ---- escritura nueva y deshacer de un archivo creado
 r = ex("write_file", {"path": "nuevo/dir/hola.txt", "content": "hola\n"})

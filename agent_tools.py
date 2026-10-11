@@ -602,10 +602,17 @@ def write_text(path, text, enc="utf-8", eol="\n"):
     data = text.replace("\r\n", "\n")
     if eol == "\r\n":
         data = data.replace("\n", "\r\n")
+    try:
+        blob = data.encode(enc)
+    except UnicodeEncodeError:
+        # El contenido nuevo tiene caracteres que no entran en la codificación vieja del archivo (un .md con emojis
+        # sobre un archivo que estaba en cp1252). UTF-8 los toma todos: mejor cambiar la codificación que perder la
+        # escritura con un UnicodeEncodeError crudo. Caso real (sesión Crack Batery 3, 2026-10-11).
+        enc, blob = "utf-8", data.encode("utf-8")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".dschat.tmp"
     with open(tmp, "wb") as f:
-        f.write(data.encode(enc))
+        f.write(blob)
     os.replace(tmp, path)
 
 
