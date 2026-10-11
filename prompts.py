@@ -28,6 +28,12 @@ Working rules:
 - To delete a file or folder use delete_path (it asks the user and keeps a copy they can restore); never delete anything the user
   did not ask you to delete.
 - If you are blocked by the safety filter, do not look for a way around it: tell the user what you wanted to do.
+- For binary files (exe, dll, firmware, saved games) use hex_dump, find_bytes and patch_bytes; read_file only reads text.
+  Before patch_bytes, look at the exact bytes with hex_dump and pass them as 'expect'. external_tools lists the analysis
+  programs on this PC (dumpbin, editbin...) and the Python libraries for binaries (pefile, capstone, lief); run them with
+  run_command. To analyze a file from outside the folder, ask the user to put a copy inside it.
+- If the folder has a Python virtual environment (.venv or venv), every run_command uses it automatically; no need to
+  activate it. Create one with `python -m venv .venv`.
 Answer in the user's language."""
 
 NO_FOLDER_PROMPT = """You are a coding assistant in a chat window. No project folder is open, so you cannot see or change

@@ -42,7 +42,7 @@ CTX_MARGIN = 0.92          # la plantilla de chat agrega tokens que no se ven en
 MIN_BUDGET_CHARS = 4000
 # Herramientas que cambian el estado del proyecto: tras una que salió bien, repetir una lectura o volver a correr
 # los tests ya no es repetir en vano (el resultado puede ser otro), así que el contador de repeticiones empieza de cero.
-STATE_CHANGING = {"write_file", "edit_file", "delete_path", "run_command"}
+STATE_CHANGING = {"write_file", "edit_file", "delete_path", "run_command", "patch_bytes"}
 
 
 def messages_size(msgs):

@@ -474,6 +474,58 @@ check("denegado: no se ejecuta ni se hace copia", r.startswith("DENIED") and sha
 for f in ("a.bin", "b.bin", "salida.txt"):
     os.remove(os.path.join(ws, f))
 
+# ---- binarios: ver, buscar y modificar bytes (como un editor hexadecimal)
+prog = os.path.join(ws, "prog.bin")
+mk(prog, b"MZ\x90\x00" + b"\x00" * 60 + b"\x74\x05\x90\x90" + "Hola".encode("utf-16-le") + b"fin")
+h_prog, n_prog = sha(prog), os.path.getsize(prog)
+r = ex("hex_dump", {"path": "prog.bin", "offset": "0x40", "length": 4})
+check("hex_dump muestra los bytes pedidos", "00000040  74 05 90 90" in r, r)
+check("hex_dump no lee fuera de la carpeta", ex("hex_dump", {"path": os.path.join(outside, "secreto.txt")}).startswith("ERROR"))
+check("hex_dump: desplazamiento pasado el final es error claro", ex("hex_dump", {"path": "prog.bin", "offset": 9999}).startswith("ERROR"))
+r = ex("find_bytes", {"path": "prog.bin", "pattern": "74 05"})
+check("find_bytes encuentra bytes en hex", "0x00000040" in r and "1 match" in r, r)
+r = ex("find_bytes", {"path": "prog.bin", "pattern": "Hola", "text": True})
+check("find_bytes encuentra texto en UTF-16", "0x00000044" in r and "utf-16le" in r, r)
+pedidos.clear()
+r = ex("patch_bytes", {"path": "prog.bin", "offset": "0x40", "expect": "75 05", "new": "EB 05"})
+check("patch_bytes con 'expect' equivocado no escribe ni pregunta", r.startswith("ERROR") and sha(prog) == h_prog and not pedidos, r)
+r = ex("patch_bytes", {"path": "prog.bin", "offset": "0x40", "expect": "74 05", "new": "EB"})
+check("patch_bytes con largos distintos es error", r.startswith("ERROR") and sha(prog) == h_prog, r)
+r = at.ToolBox(ws, confirm=confirm_no, approval="ask", backup_dir=bk).execute(
+    "patch_bytes", {"path": "prog.bin", "offset": "0x40", "expect": "74 05", "new": "EB 05"})
+check("patch_bytes denegado no escribe", r.startswith("DENIED") and sha(prog) == h_prog, r)
+pedidos.clear()
+r = ex("patch_bytes", {"path": "prog.bin", "offset": "0x40", "expect": "74 05", "new": "EB 05"})
+with open(prog, "rb") as f:
+    datos = f.read()
+check("patch_bytes escribe, verifica y no cambia el tamaño", r.startswith("OK") and datos[0x40:0x42] == b"\xEB\x05"
+      and len(datos) == n_prog and datos[:0x40] == b"MZ\x90\x00" + b"\x00" * 60, r)
+check("patch_bytes pide permiso como edición, con antes y después", pedidos and pedidos[0][0] == "edit"
+      and "-00000040  74 05" in pedidos[0][2] and "+00000040  EB 05" in pedidos[0][2], pedidos)
+tb.undo_last()
+check("deshacer restaura el binario byte por byte", sha(prog) == h_prog)
+os.remove(prog)
+
+# ---- programas de análisis: dumpbin se encuentra aunque no esté en el PATH, y corre
+if at.msvc_bin_dir():
+    r = ex("run_command", {"command": "dumpbin /headers " + sys.executable})
+    check("dumpbin corre desde run_command sin estar en el PATH", r.startswith("[exit code 0]") and "PE signature found" in r, r[:300])
+else:
+    print("AVISO no se probó dumpbin: no hay Visual Studio con herramientas de C++ en esta PC")
+r = ex("external_tools", {})
+check("external_tools informa dumpbin y las librerías de Python", "dumpbin:" in r and "pefile=" in r, r)
+
+# ---- entorno virtual: cada comando lo usa sin activarlo
+ws_v = os.path.join(base, "con_venv")
+os.makedirs(ws_v)
+tb_v = at.ToolBox(ws_v, confirm=confirm_si, approval="ask", backup_dir=os.path.join(base, "respaldos_v"))
+r0 = tb_v.execute("run_command", {"command": 'python -c "import sys; print(sys.prefix)"'})
+check("control: sin .venv, Python es el del sistema", ws_v.lower() not in r0.lower(), r0)
+r = tb_v.execute("run_command", {"command": "python -m venv --without-pip .venv", "timeout": 120})
+check("(preparación) .venv creado", r.startswith("[exit code 0]") and tb_v.venv_dir(), r)
+r = tb_v.execute("run_command", {"command": 'python -c "import sys; print(sys.prefix)"'})
+check("con .venv, cada comando usa su Python sin activarlo", os.path.join(ws_v, ".venv").lower() in r.lower(), r)
+
 # ---- protocolo
 check("herramienta desconocida: error que lista las válidas", "unknown tool" in ex("format_disk", {}) and "read_file" in ex("format_disk", {}))
 check("argumentos de más: error claro, no excepción", ex("read_file", {"path": "calc.py", "basura": 1}).startswith("ERROR"))

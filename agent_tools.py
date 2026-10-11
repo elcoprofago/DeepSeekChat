@@ -458,6 +458,87 @@ def format_bytes(n):
     return f"{n} bytes" if n < 1024 else f"{n / 1024:.1f} KB" if n < 1024 ** 2 else f"{n / 1024 ** 2:.1f} MB"
 
 
+# ---------------------------------------------------------------- binarios y programas de análisis
+# dumpbin, editbin, lib y undname vienen con las herramientas de C++ de Visual Studio, pero no quedan en el PATH (solo
+# en la «Developer Command Prompt»). Medido el 2026-10-11: estaban en las Build Tools 2026 y run_command no los veía.
+
+MAX_HEX_BYTES = 4096
+MAX_BYTE_HITS = 100
+ANALYSIS_EXES = ["dumpbin", "editbin", "undname", "objdump", "llvm-objdump", "nm", "readelf", "strings", "strings64",
+                 "sigcheck", "sigcheck64", "radare2", "rizin", "upx", "7z", "ilspycmd", "diec", "certutil", "git", "dotnet"]
+ANALYSIS_PY = ["pefile", "capstone", "lief", "elftools", "keystone"]
+
+
+def _version_key(name):
+    return tuple(int(x) for x in re.findall(r"\d+", name))
+
+
+_msvc_cache = []
+
+
+def msvc_bin_dir():
+    """Carpeta de dumpbin.exe de la última instalación de Visual Studio con herramientas de C++, o None. Se busca una vez."""
+    if _msvc_cache:
+        return _msvc_cache[0]
+    found = None
+    vswhere = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                           "Microsoft Visual Studio", "Installer", "vswhere.exe")
+    try:
+        r = subprocess.run([vswhere, "-all", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                            "-property", "installationPath"], capture_output=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        installs = decode_output(r.stdout).splitlines() if r.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError):
+        installs = []
+    best = None
+    for inst in (i.strip() for i in installs if i.strip()):
+        msvc = os.path.join(inst, "VC", "Tools", "MSVC")
+        try:
+            versions = os.listdir(msvc)
+        except OSError:
+            continue
+        for v in versions:
+            d = os.path.join(msvc, v, "bin", "Hostx64", "x64")
+            if os.path.isfile(os.path.join(d, "dumpbin.exe")) and (best is None or _version_key(v) > best[0]):
+                best = (_version_key(v), d)
+    found = best[1] if best else None
+    _msvc_cache.append(found)
+    return found
+
+
+def _parse_offset(v):
+    """Desplazamiento como entero o texto ('0x3C', '60'): los modelos escriben los dos."""
+    try:
+        n = v if isinstance(v, int) else int(str(v).strip(), 0)
+    except ValueError:
+        raise ToolError(f"offset '{v}' is not a number (use 60 or 0x3C)")
+    if n < 0:
+        raise ToolError("offset must not be negative")
+    return n
+
+
+def _parse_hex(s, what):
+    clean = re.sub(r"[\s,]|0x", "", str(s or ""), flags=re.I)
+    try:
+        b = bytes.fromhex(clean)
+    except ValueError:
+        raise ToolError(f"'{what}' is not valid hex (example: '4D 5A 90 00')")
+    if not b:
+        raise ToolError(f"'{what}' is empty")
+    return b
+
+
+def hex_lines(data, start):
+    """Volcado clásico: desplazamiento, 16 bytes en hexadecimal y su texto ASCII."""
+    out = []
+    for i in range(0, len(data), 16):
+        row = data[i:i + 16]
+        hx = " ".join(f"{b:02X}" for b in row)
+        txt = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+        out.append(f"{start + i:08X}  {hx:<47}  |{txt}|")
+    return out
+
+
 # ---------------------------------------------------------------- texto y archivos
 
 def _oem_codepage():
@@ -664,6 +745,110 @@ class ToolBox:
                         return "\n".join(hits) + f"\n[stopped at {MAX_SEARCH_MATCHES} matches; narrow the search]"
         return "\n".join(hits) if hits else f"no matches in {files} text files"
 
+    def tool_hex_dump(self, path, offset=0, length=256):
+        p = self.resolve(path)
+        if os.path.isdir(p):
+            raise ToolError(f"'{path}' is a folder")
+        offset, size = _parse_offset(offset), os.path.getsize(p)
+        length = max(1, min(_parse_offset(length), MAX_HEX_BYTES))
+        if offset >= size:
+            raise ToolError(f"offset 0x{offset:X} is past the end of the file ({size} bytes = 0x{size:X})")
+        with open(p, "rb") as f:
+            f.seek(offset)
+            data = f.read(length)
+        end = offset + len(data)
+        more = f" Use offset=0x{end:X} to continue." if end < size else ""
+        return f"[{self.rel(p)}: bytes 0x{offset:X}-0x{end - 1:X} of {size} (0x{size:X}).{more}]\n" + "\n".join(hex_lines(data, offset))
+
+    def tool_find_bytes(self, path, pattern, text=False):
+        p = self.resolve(path)
+        if os.path.isdir(p):
+            raise ToolError(f"'{path}' is a folder")
+        if text:
+            if not pattern:
+                raise ToolError("'pattern' is empty")
+            needles = [("ascii/utf-8", pattern.encode("utf-8")), ("utf-16le", pattern.encode("utf-16-le"))]
+        else:
+            needles = [("hex", _parse_hex(pattern, "pattern"))]
+        size = os.path.getsize(p)
+        if size == 0:
+            return "no matches (empty file)"
+        import mmap
+        hits = []
+        with open(p, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            for label, nd in needles:
+                i = m.find(nd)
+                while i >= 0 and len(hits) < MAX_BYTE_HITS:
+                    ctx = m[i:i + max(len(nd), 16)]
+                    hits.append((i, f"0x{i:08X}  {label:<11}  {' '.join(f'{b:02X}' for b in ctx[:16])}"))
+                    i = m.find(nd, i + 1)
+        if not hits:
+            return f"no matches in {self.rel(p)} ({size} bytes)"
+        lines = [h for _, h in sorted(hits)]
+        tail = f"\n[stopped at {MAX_BYTE_HITS} matches; narrow the pattern]" if len(hits) >= MAX_BYTE_HITS else ""
+        return f"[{self.rel(p)}: {len(lines)} match{'es' if len(lines) != 1 else ''}]\n" + "\n".join(lines) + tail
+
+    def tool_patch_bytes(self, path, offset, expect, new):
+        p = self.resolve(path)
+        if os.path.isdir(p) or _is_link(p):
+            raise ToolError(f"'{path}' is not a regular file")
+        offset, old_b, new_b = _parse_offset(offset), _parse_hex(expect, "expect"), _parse_hex(new, "new")
+        if len(old_b) != len(new_b):
+            raise ToolError(f"'expect' has {len(old_b)} bytes and 'new' has {len(new_b)}: a patch replaces bytes in place, "
+                            "so both must have the same length")
+        size = os.path.getsize(p)
+        if offset + len(new_b) > size:
+            raise ToolError(f"the patch ends past the end of the file ({size} bytes = 0x{size:X})")
+        if size > MAX_DELETE_BYTES:
+            raise ToolError(f"file is too big to keep a restorable copy ({size // 2**20} MB, limit {MAX_DELETE_BYTES // 2**20} MB)")
+        with open(p, "rb") as f:
+            f.seek(offset)
+            cur = f.read(len(old_b))
+        if cur != old_b:
+            raise ToolError(f"the bytes at 0x{offset:X} are {cur.hex(' ').upper()}, not {old_b.hex(' ').upper()} as 'expect' says. "
+                            "Nothing was changed. Look at them again with hex_dump")
+        if cur == new_b:
+            return f"OK: nothing to do, the bytes at 0x{offset:X} already are {new_b.hex(' ').upper()}"
+        detail = "\n".join([f"--- {self.rel(p)} (antes)", f"+++ {self.rel(p)} (después)"]
+                           + ["-" + ln for ln in hex_lines(old_b, offset)] + ["+" + ln for ln in hex_lines(new_b, offset)])
+        if not self._ask("edit", f"Modificar bytes de {self.rel(p)} en 0x{offset:X}", detail):
+            return "DENIED: the user did not allow this change. Do not retry the same change; ask the user what they want."
+        backup = self._backup(p)
+        with open(p, "r+b") as f:
+            f.seek(offset)
+            f.write(new_b)
+            f.flush()
+            os.fsync(f.fileno())
+        with open(p, "rb") as f:
+            f.seek(offset)
+            ok = f.read(len(new_b)) == new_b
+        self.journal.append({"path": p, "backup": backup, "when": time.strftime("%Y-%m-%d %H:%M:%S")})
+        if not ok or os.path.getsize(p) != size:
+            raise ToolError("the bytes read back after writing do not match the patch; use undo to restore the file")
+        return f"OK: wrote {len(new_b)} byte{'s' if len(new_b) != 1 else ''} at 0x{offset:X} in {self.rel(p)} (read back and verified); the user can undo it"
+
+    def tool_external_tools(self):
+        env = self._env()
+        lines = ["Analysis programs on this PC (run them with run_command):"]
+        for name in ANALYSIS_EXES:
+            w = shutil.which(name, path=env["PATH"])
+            lines.append(f"  {name}: {w if w else 'not found'}")
+        py = shutil.which("python", path=env["PATH"])
+        if py:
+            code = "import importlib.util as u;print(' '.join(m+'='+('yes' if u.find_spec(m) else 'no') for m in %r))" % ANALYSIS_PY
+            try:
+                r = subprocess.run([py, "-c", code], capture_output=True, timeout=30, env=env, cwd=self.root,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                libs = decode_output(r.stdout).strip() or decode_output(r.stderr).strip()[:300]
+            except (OSError, subprocess.SubprocessError) as e:
+                libs = f"could not check ({e})"
+            lines.append(f"Python used by run_command: {py}\n  libraries: {libs}")
+        else:
+            lines.append("Python: not found")
+        v = self.venv_dir()
+        lines.append(f"Virtual environment: {self.rel(v) + ' (active in every command)' if v else 'none in the workspace folder'}")
+        return "\n".join(lines)
+
     def _walk_files(self, base):
         for d, dirs, fs in os.walk(base):
             dirs[:] = sorted(x for x in dirs if x not in IGNORE_DIRS)
@@ -843,16 +1028,35 @@ class ToolBox:
             guardadas.append(self.rel(p))
         return guardadas
 
-    def _run(self, command, timeout, cancel):
-        timeout = max(1, min(int(timeout), MAX_TIMEOUT))
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    def venv_dir(self):
+        """El entorno virtual de Python de la carpeta de trabajo (.venv o venv en la raíz), o None."""
+        for name in (".venv", "venv"):
+            d = os.path.join(self.root, name)
+            if os.path.isfile(os.path.join(d, "Scripts", "python.exe")) and os.path.isfile(os.path.join(d, "pyvenv.cfg")):
+                return d
+        return None
+
+    def _env(self):
         # Los programas de Python y Node escriben UTF-8 si se les pide; los comandos propios de cmd (dir, type)
         # escriben en la página OEM. Se intenta UTF-8 estricto y, si no es válido, OEM.
         env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
         env["PATH"] = cmd_path(env.get("PATH", ""))
-        if self.extra_path:
-            # al final: si la máquina ya tiene su propio Python o Node, ese gana; los del pendrive son el respaldo
-            env["PATH"] = os.pathsep.join([env.get("PATH", "")] + [p for p in self.extra_path if os.path.isdir(p)])
+        # al final: si la máquina ya tiene su propio Python o Node, ese gana; los del pendrive son el respaldo
+        tail = [p for p in self.extra_path if os.path.isdir(p)] + [d for d in [msvc_bin_dir()] if d]
+        if tail:
+            env["PATH"] = os.pathsep.join([env["PATH"]] + tail)
+        # Cada comando es un cmd nuevo: un `activate` no dura al siguiente. Si la carpeta tiene su entorno, va siempre.
+        v = self.venv_dir()
+        if v:
+            env["VIRTUAL_ENV"] = v
+            env.pop("PYTHONHOME", None)
+            env["PATH"] = os.pathsep.join([os.path.join(v, "Scripts"), env["PATH"]])
+        return env
+
+    def _run(self, command, timeout, cancel):
+        timeout = max(1, min(int(timeout), MAX_TIMEOUT))
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        env = self._env()
         try:
             proc = subprocess.Popen(command, shell=True, cwd=self.root, stdin=subprocess.DEVNULL, env=env,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags)
@@ -952,6 +1156,24 @@ SPECS = [
     _fn("write_file", "Create a new file or fully overwrite one, with its whole content in one call (any language, any "
         "quotes). Prefer edit_file for small changes to existing files.",
         {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
+    _fn("hex_dump", "Show the bytes of any file (exe, dll, image, save file...) as hex and ASCII, like a hex editor. "
+        "read_file only reads text.",
+        {"path": {"type": "string"},
+         "offset": {"type": "string", "description": "First byte, decimal or hex like '0x3C', default 0"},
+         "length": {"type": "integer", "description": "Bytes to show, default 256, max 4096"}}, ["path"]),
+    _fn("find_bytes", "Find where a byte sequence or a string appears in a file. Returns the offsets in hex.",
+        {"path": {"type": "string"},
+         "pattern": {"type": "string", "description": "Hex bytes like '4D 5A 90 00', or a string if text=true"},
+         "text": {"type": "boolean", "description": "Search a string, as ASCII/UTF-8 and as UTF-16LE"}}, ["path", "pattern"]),
+    _fn("patch_bytes", "Overwrite bytes of a file in place (same length; the file size never changes), like a hex editor. "
+        "'expect' must be the bytes there now, copied from hex_dump: if they differ nothing is written. The user is asked "
+        "and can undo it.",
+        {"path": {"type": "string"},
+         "offset": {"type": "string", "description": "First byte to change, decimal or hex like '0x1A2B'"},
+         "expect": {"type": "string", "description": "Hex bytes currently at offset, e.g. '74 05'"},
+         "new": {"type": "string", "description": "Hex bytes to write, same length, e.g. 'EB 05'"}}, ["path", "offset", "expect", "new"]),
+    _fn("external_tools", "List the analysis programs found on this PC (dumpbin, editbin, objdump, 7z...), the Python "
+        "libraries for binaries (pefile, capstone, lief) and the virtual environment that run_command uses.", {}, []),
     _fn("delete_path", "Delete a file or a folder (with everything in it) inside the workspace. The user is asked first and can undo it. "
         "Only delete what the user asked you to delete. Symlinks and junctions are never deleted.",
         {"path": {"type": "string", "description": "File or folder to delete"}}, ["path"]),
