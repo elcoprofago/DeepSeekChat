@@ -39,6 +39,14 @@ SAME_ERROR_ABORT = 8
 # 3, 2026-10-11): el modelo local reenvió el placeholder como contenido 22 veces, oscilando con pasos que salían bien y
 # reiniciaban los otros contadores, así que el corte por bucle nunca se afirmaba y el usuario veía parar y seguir sin fin.
 PLACEHOLDER_ABORT = 3
+# La misma escritura aplicada de nuevo: una edición idéntica solo vuelve a salir bien si algo la deshizo en el medio, así
+# que el modelo va y vuelve entre dos versiones. Cada vuelta sale bien y reinicia los contadores de arriba, por eso lleva
+# el suyo, que no se reinicia en toda la corrida. Caso real (sesión G. RANGER / CLON, 2026-10-12): el modelo local
+# alternó pe.filename y pe.path en el mismo script una docena de veces, corriéndolo entre cada cambio, sin leer que el
+# error decía que ninguno de los dos existe; nada lo frenaba hasta el tope de 120 pasos.
+REWRITES = {"write_file", "edit_file", "patch_bytes"}
+REWRITE_WARN = 2
+REWRITE_ABORT = 3
 ERROR_PREFIXES = ("ERROR", "BLOCKED", "DENIED")
 DEFAULT_MAX_STEPS = 120
 # Modelos locales: el presupuesto de historial sale de la ventana de contexto real, no de un número fijo de caracteres.
@@ -250,7 +258,7 @@ class Agent:
     def run(self, messages, emit, cancel):
         """Avanza hasta la respuesta final. Devuelve 'done', 'cancelled', 'max_steps' o 'loop'. Los errores de red
         (ApiError) se propagan: los mensajes quedan bien formados hasta el último paso completo."""
-        seen, errors, placeholders = {}, {}, 0
+        seen, errors, placeholders, rewrites = {}, {}, 0, {}
         for step in range(1, self.max_steps + 1):
             if cancel.is_set():
                 return "cancelled"
@@ -338,11 +346,25 @@ class Agent:
                                 result += ("\n\nStopped: you copied the compaction placeholder %d times. It is never "
                                            "real content. Tell the user what you were trying to write, and that you need "
                                            "to read the file again first to get its actual text." % placeholders)
+                        elif name in REWRITES and rewrites.get(key, 0) >= REWRITE_ABORT - 1:
+                            aborted = True
+                            result = ("ERROR: this call was not run: you already applied this exact change %d times in "
+                                      "this task, undoing it in between. You are going back and forth between two versions "
+                                      "and neither fixes the problem. Stopped: tell the user what you were trying to fix, "
+                                      "both versions you tried, and the exact error message." % rewrites[key])
                         else:
                             result = self.toolbox.execute(name, args, cancel)
                             if name in STATE_CHANGING and not result.startswith(ERROR_PREFIXES):
                                 seen.clear()
                                 errors.clear()
+                                if name in REWRITES:
+                                    rewrites[key] = rewrites.get(key, 0) + 1
+                                    if rewrites[key] >= REWRITE_WARN:
+                                        result += ("\n\nNOTE: you already applied this exact change before in this task, "
+                                                   "and undid it since. Going back to a version that already failed will "
+                                                   "fail the same way. Read the whole error message: if it says that "
+                                                   "neither option exists, look for the right one (read the library's code "
+                                                   "or list its attributes) instead of alternating.")
                     kind = None if aborted or cancel.is_set() else error_kind(result)
                     if kind:
                         errors[kind] = errors.get(kind, 0) + 1
@@ -358,8 +380,8 @@ class Agent:
                 messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
                 emit("tool_result", c["id"], name, result)
             if aborted:
-                emit("notice", "Se detectó un bucle (el modelo repitió la misma llamada o recibió el mismo error una y "
-                               "otra vez); se detuvo el agente.")
+                emit("notice", "Se detectó un bucle (el modelo repitió la misma llamada, recibió el mismo error una y "
+                               "otra vez, o fue y volvió entre dos versiones del mismo cambio); se detuvo el agente.")
                 return "loop"
         emit("notice", f"Se alcanzó el máximo de {self.max_steps} pasos sin una respuesta final. Apretá «Continuar» (o escribí «seguí») para que siga.")
         return "max_steps"

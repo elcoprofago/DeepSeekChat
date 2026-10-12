@@ -400,6 +400,32 @@ doc = "Si ves " + agent.ARGS_OMITTED + " en el historial, releé el archivo.\n"
 st, m, ev, f = run([[("tool_calls", [call("p2", "write_file", {"path": "doc.txt", "content": doc})]), ("finish", "tool_calls")], fin])
 check("CONTROL: un texto que solo menciona el aviso se escribe normalmente",
       m[2]["content"].startswith("OK") and open(os.path.join(ws, "doc.txt"), encoding="utf-8").read() == doc, m[2]["content"][:80])
+# ---- ir y volver entre dos versiones (sesión G. RANGER / CLON, 2026-10-12: pe.filename <-> pe.path sin fin)
+open(os.path.join(ws, "s.py"), "w").write("x = pe.filename\n")
+ida = {"path": "s.py", "old": "pe.filename", "new": "pe.path"}
+vuelta = {"path": "s.py", "old": "pe.path", "new": "pe.filename"}
+osc = []
+for i in range(6):
+    osc.append([("tool_calls", [call("e%d" % i, "edit_file", ida if i % 2 == 0 else vuelta)]), ("finish", "tool_calls")])
+    osc.append([("tool_calls", [call("v%d" % i, "read_file", {"path": "s.py"})]), ("finish", "tool_calls")])
+st, m, ev, f = run(osc + [fin])
+eds = [x["content"] for x in m if x["role"] == "tool" and x["tool_call_id"].startswith("e")]
+check("ida y vuelta: la 2.ª vez que se aplica el mismo cambio sale bien pero avisa",
+      eds[0].startswith("OK") and "NOTE" not in eds[0] and "NOTE" not in eds[1]
+      and eds[2].startswith("OK") and "already applied this exact change" in eds[2], eds[:3])
+check("ida y vuelta: la 3.ª vez no se ejecuta y se corta como bucle",
+      st == "loop" and len(eds) == 5 and eds[4].startswith("ERROR") and "Stopped" in eds[4] and agent.validate(m) == [],
+      (st, len(eds), eds[-1][:80]))
+check("ida y vuelta: el archivo quedó en la última versión que sí se aplicó (la 4.ª, la vuelta por 2.ª vez)",
+      "already applied" in eds[3] and open(os.path.join(ws, "s.py")).read() == "x = pe.filename\n")
+# CONTROL: una cadena de cambios distintos sobre el mismo archivo (progreso real) no se frena
+open(os.path.join(ws, "c.py"), "w").write("v0\n")
+cadena = [[("tool_calls", [call("c%d" % i, "edit_file", {"path": "c.py", "old": "v%d" % i, "new": "v%d" % (i + 1)})]),
+           ("finish", "tool_calls")] for i in range(8)]
+st, m, ev, f = run(cadena + [fin])
+res = [x["content"] for x in m if x["role"] == "tool"]
+check("CONTROL: ocho cambios distintos seguidos salen todos bien y sin aviso",
+      st == "done" and all(r.startswith("OK") and "NOTE" not in r for r in res) and len(res) == 8, (st, res))
 # ---- quién contestó: queda en cada respuesta y no se manda al modelo
 # Una sesión que pasó de DeepSeek a un modelo local mostraba (y exportaba) todo como escrito por el local.
 st, m, ev, f = run([[("tool_calls", [call("q1", "list_dir", {"path": "."})]), ("finish", "tool_calls")], fin], label="Qwen-X")
