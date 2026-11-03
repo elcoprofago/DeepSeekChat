@@ -438,7 +438,7 @@ class App:
         try:
             self.root.update_idletasks()
             hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
-            v = ctypes.c_int(1 if self.cfg["theme"] == "oscuro" else 0)
+            v = ctypes.c_int(1 if theme.pick(self.cfg["theme"]).get("dark") else 0)
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(v), ctypes.sizeof(v))
         except (AttributeError, OSError, tk.TclError):
             pass
@@ -475,7 +475,7 @@ class App:
         fs = int(self.cfg["font_size"])
         self.chat.apply_theme(t, fs)
         self.input.configure(bg=t["side"], fg=t["fg"], insertbackground=t["fg"], highlightbackground=t["border"],
-                             highlightcolor=t["accent"], font=("Segoe UI", fs))
+                             highlightcolor=t["accent"], font=(theme.ui_font(t), fs))
         if isinstance(self.btn_send, tk.Button):
             self.btn_send.configure(bg=t["bg"], activebackground=t["bg"])
         else:

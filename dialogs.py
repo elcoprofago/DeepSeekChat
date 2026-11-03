@@ -13,6 +13,7 @@ import dsapi
 import localmodels
 import providers
 import qrcodegen
+import theme
 import version
 
 TITULO = "CodeAgent"
@@ -675,8 +676,8 @@ class SettingsDialog:
         self.max_var = tk.IntVar(value=int(cfg["max_tokens"]))
         ttk.Spinbox(f, from_=1024, to=393216, increment=1024, textvariable=self.max_var, width=9).grid(row=2, column=1, padx=(6, 18))
         ttk.Label(f, text="Tema").grid(row=2, column=2)
-        self.theme_var = tk.StringVar(value=cfg["theme"])
-        ttk.Combobox(f, textvariable=self.theme_var, values=list(self.app.themes), state="readonly", width=8).grid(row=2, column=3, padx=(6, 18))
+        self.theme_var = tk.StringVar(value=theme.canonical(cfg["theme"]))
+        ttk.Combobox(f, textvariable=self.theme_var, values=list(self.app.themes), state="readonly", width=15).grid(row=2, column=3, padx=(6, 18))
         ttk.Label(f, text="Tamaño de letra").grid(row=2, column=4)
         self.font_var = tk.IntVar(value=int(cfg["font_size"]))
         ttk.Spinbox(f, from_=8, to=22, textvariable=self.font_var, width=4).grid(row=2, column=5, padx=6)

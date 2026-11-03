@@ -485,7 +485,18 @@ shot("03_final.png")
 check("título de la ventana como el de USBagent, con la versión (y fijo aunque cambie la sesión)",
       dc.TITULO_VENTANA == f"CodeAgent v{version.VERSION} - \u00a9 R.A. Sistemas - 2026" and root.title() == dc.TITULO_VENTANA, root.title())
 check("la versión tiene cuatro números", len(version.VERSION.split(".")) == 4 and all(x.isdigit() for x in version.VERSION.split(".")), version.VERSION)
-check("el tema por defecto es el oscuro azul", dsapi.Config.DEFAULTS["theme"] == "oscuro"
+check("los temas son Predeterminado y Warlords; una config vieja «oscuro»/«claro» cae en Predeterminado",
+      list(theme.THEMES) == ["Predeterminado", "Warlords"] and theme.canonical("oscuro") == "Predeterminado"
+      and theme.canonical("claro") == "Predeterminado" and theme.canonical("Warlords") == "Warlords")
+app.cfg["theme"] = "Warlords"
+app.apply_theme()
+check("EFECTO: con Warlords el chat queda en el fondo de la terminal y en Consolas",
+      app.chat.text.cget("bg") == "#0e1016" and "Consolas" in str(app.chat.text.cget("font")), (app.chat.text.cget("bg"), app.chat.text.cget("font")))
+app.cfg["theme"] = "Predeterminado"
+app.apply_theme()
+check("CONTROL: Predeterminado vuelve al chat negro en Segoe UI",
+      app.chat.text.cget("bg") == "#000000" and "Segoe" in str(app.chat.text.cget("font")), app.chat.text.cget("font"))
+check("el tema por defecto es el Predeterminado", dsapi.Config.DEFAULTS["theme"] == "Predeterminado"
       and all(k in theme.THEMES[n] for n in theme.THEMES for k in ("meter_fill", "accent_text")))
 
 

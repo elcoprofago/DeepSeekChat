@@ -2,16 +2,21 @@
 from tkinter import ttk
 
 THEMES = {
-    "claro": dict(bg="#f2f4f7", panel="#ffffff", fg="#1c2733", muted="#66727f", user="#0b5cad",
-                  bot="#17743f", code_bg="#eceff3", reason="#8a94a0", accent="#0b5cad",
-                  accent_fg="#ffffff", err="#b3261e", border="#d3d9e0", accent_text="#0b5cad", meter_fill="#b6d3f2",
-                  final="#0b7a8f", side="#ffffff", chat_bg="#ffffff"),
     # Azul nocturno estilo VSCode: capas de azul (ventana < chat < sesiones/explorador/entrada) y acentos en azul claro / cian.
-    "oscuro": dict(bg="#0c1520", panel="#1c2d42", side="#26405e", fg="#d4e1f0", muted="#8aa1bb", user="#5cb3ff",
+    "Predeterminado": dict(dark=True, bg="#0c1520", panel="#1c2d42", side="#26405e", fg="#d4e1f0", muted="#8aa1bb", user="#5cb3ff",
                    bot="#4fd1c5", code_bg="#0d1826", reason="#7f96b0", accent="#0e639c",
                    accent_fg="#ffffff", err="#f48771", border="#2c4260", accent_text="#6cb6ff", meter_fill="#0e639c",
                    final="#8be9fd", chat_bg="#000000"),      # el chat, en negro: la conversación contrasta con los paneles
+    # La terminal del Actualizador de Warlords (actualizador-warlords, Terminal.cs: Paleta), sin el cartel gigante:
+    # fondo casi negro, letra monoespaciada y los colores vivos de su paleta (verde, cian, violeta, naranja).
+    "Warlords": dict(dark=True, font="Consolas", bg="#0e1016", panel="#1a1d27", side="#151821", fg="#d8dee9",
+                     muted="#6b7289", user="#ffb86c", bot="#50fa7b", code_bg="#1a1d27", reason="#6b7289",
+                     accent="#bd93f9", accent_fg="#0e1016", err="#ff5555", border="#3a3f50", accent_text="#8be9fd",
+                     meter_fill="#50fa7b", final="#f1fa8c", chat_bg="#0e1016"),
 }
+
+# Nombres viejos guardados en la configuración -> el tema que les corresponde ahora.
+ALIASES = {"oscuro": "Predeterminado", "claro": "Predeterminado"}   # «claro» se quitó en 1.0.0.19
 
 
 # «Continuar» tiene que saltar a la vista en cualquier tema: amarillo limón con letra negra, igual en claro y oscuro.
@@ -20,8 +25,16 @@ LIMON_ACTIVO = "#ffe61a"
 NEGRO = "#000000"
 
 
+def canonical(name):
+    return ALIASES.get(name, name) if ALIASES.get(name, name) in THEMES else "Predeterminado"
+
+
 def pick(name):
-    return THEMES.get(name, THEMES["claro"])
+    return THEMES[canonical(name)]
+
+
+def ui_font(t):
+    return t.get("font", "Segoe UI")
 
 
 def apply_styles(root, t):
@@ -30,13 +43,13 @@ def apply_styles(root, t):
     if s.theme_use() != "clam":
         s.theme_use("clam")
     root.configure(bg=t["bg"])
-    s.configure(".", background=t["bg"], foreground=t["fg"], bordercolor=t["border"], font=("Segoe UI", 10))
+    s.configure(".", background=t["bg"], foreground=t["fg"], bordercolor=t["border"], font=(ui_font(t), 10))
     s.configure("TFrame", background=t["bg"])
     s.configure("TLabel", background=t["bg"], foreground=t["fg"])
     s.configure("Err.TLabel", background=t["bg"], foreground=t["err"])
     s.configure("Ok.TLabel", background=t["bg"], foreground=t["bot"])
     s.configure("Muted.TLabel", background=t["bg"], foreground=t["muted"])
-    s.configure("Title.TLabel", background=t["bg"], foreground=t["fg"], font=("Segoe UI", 10, "bold"))
+    s.configure("Title.TLabel", background=t["bg"], foreground=t["fg"], font=(ui_font(t), 10, "bold"))
     s.configure("TButton", background=t["panel"], foreground=t["fg"], bordercolor=t["border"], padding=(10, 4))
     s.map("TButton", background=[("active", t["border"]), ("disabled", t["bg"])], foreground=[("disabled", t["muted"])])
     s.configure("Accent.TButton", background=t["accent"], foreground=t["accent_fg"])

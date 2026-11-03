@@ -470,7 +470,7 @@ class Config:
         "model": "deepseek-v4-pro",
         "effort": "",
         "system_prompt": "",
-        "theme": "oscuro",
+        "theme": "Predeterminado",
         "font_size": 11,
         "max_tokens": 32768,
         "api_key_enc": "",       # DPAPI: atada al usuario de Windows (modo instalado)

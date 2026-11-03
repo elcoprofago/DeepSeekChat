@@ -73,17 +73,18 @@ class ChatView:
 
     def apply_theme(self, t, fs):
         self.t = t
+        ui = t.get("font", "Segoe UI")
         c = self.text
         c.configure(bg=t.get("chat_bg", t["bg"]), fg=t["fg"], insertbackground=t["fg"], highlightbackground=t["border"],
-                    highlightcolor=t["border"], font=("Segoe UI", fs), selectbackground=t["accent"], selectforeground=t["accent_fg"])
-        c.tag_configure("hdr_user", foreground=t["user"], font=("Segoe UI", fs, "bold"), spacing1=10)
-        c.tag_configure("hdr_bot", foreground=t["bot"], font=("Segoe UI", fs, "bold"), spacing1=10)
-        c.tag_configure("note", foreground=t["muted"], font=("Segoe UI", fs - 1, "italic"))
-        c.tag_configure("error", foreground=t["err"], font=("Segoe UI", fs, "bold"))
-        c.tag_configure("reason", foreground=t["reason"], font=("Segoe UI", fs - 1, "italic"))
+                    highlightcolor=t["border"], font=(ui, fs), selectbackground=t["accent"], selectforeground=t["accent_fg"])
+        c.tag_configure("hdr_user", foreground=t["user"], font=(ui, fs, "bold"), spacing1=10)
+        c.tag_configure("hdr_bot", foreground=t["bot"], font=(ui, fs, "bold"), spacing1=10)
+        c.tag_configure("note", foreground=t["muted"], font=(ui, fs - 1, "italic"))
+        c.tag_configure("error", foreground=t["err"], font=(ui, fs, "bold"))
+        c.tag_configure("reason", foreground=t["reason"], font=(ui, fs - 1, "italic"))
         c.tag_configure("final", foreground=t["final"])      # la respuesta definitiva, aparte del log de trabajo
-        c.tag_configure("rtoggle", foreground=t["reason"], font=("Segoe UI", fs - 1, "italic", "underline"))
-        c.tag_configure("bold", font=("Segoe UI", fs, "bold"))
+        c.tag_configure("rtoggle", foreground=t["reason"], font=(ui, fs - 1, "italic", "underline"))
+        c.tag_configure("bold", font=(ui, fs, "bold"))
         c.tag_configure("inline", font=("Consolas", fs), background=t["code_bg"])
         c.tag_configure("code", font=("Consolas", fs), background=t["code_bg"], lmargin1=16, lmargin2=16,
                         rmargin=16, spacing1=0, spacing3=0)
@@ -91,7 +92,7 @@ class ChatView:
         c.tag_configure("tool", foreground=t.get("accent_text", t["accent"]), font=("Consolas", fs - 1), lmargin1=14, lmargin2=28, spacing1=4)
         c.tag_configure("toolres", foreground=t["muted"], font=("Consolas", fs - 1), lmargin1=28, lmargin2=28)
         c.tag_configure("toolbad", foreground=t["err"], font=("Consolas", fs - 1), lmargin1=28, lmargin2=28)
-        c.tag_configure("tooltoggle", foreground=t["reason"], font=("Segoe UI", fs - 2, "italic", "underline"), lmargin1=28)
+        c.tag_configure("tooltoggle", foreground=t["reason"], font=(ui, fs - 2, "italic", "underline"), lmargin1=28)
         c.tag_configure("toolbody", foreground=t["muted"], font=("Consolas", fs - 2), lmargin1=40, lmargin2=40)
         c.tag_raise("sel")
 

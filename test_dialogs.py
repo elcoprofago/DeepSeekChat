@@ -247,7 +247,7 @@ try:
     # opciones
     s.max_var.set(2048)
     s.font_var.set(13)
-    s.theme_var.set("oscuro")
+    s.theme_var.set("Predeterminado")
     s.sys_text.delete("1.0", "end")
     s.sys_text.insert("1.0", "Sé breve.")
     carpeta_modelos = os.path.join(tmp, "mis modelos")
@@ -257,11 +257,11 @@ try:
     s.save_options()
     root.update()
     c5 = dsapi.Config()
-    check("opciones guardadas en disco", c5["max_tokens"] == 2048 and c5["font_size"] == 13 and c5["theme"] == "oscuro"
+    check("opciones guardadas en disco", c5["max_tokens"] == 2048 and c5["font_size"] == 13 and c5["theme"] == "Predeterminado"
           and c5["system_prompt"] == "Sé breve." and c5["local_ctx"] == 8192 and c5["model_dirs"] == [carpeta_modelos],
           (c5["max_tokens"], c5["theme"], c5["model_dirs"]))
     check("guardar opciones re-aplica tema y reescanea modelos", app4.themes_applied == 1 and app4.rescans == 1)
-    check("el diálogo se repinta con el tema nuevo", str(s.win.cget("bg")) == theme.THEMES["oscuro"]["bg"], s.win.cget("bg"))
+    check("el diálogo se repinta con el tema nuevo", str(s.win.cget("bg")) == theme.THEMES["Predeterminado"]["bg"], s.win.cget("bg"))
 
     s.max_var.set(1)
     s.save_options()
@@ -272,12 +272,12 @@ try:
     s = dialogs.SettingsDialog(app4)
     root.update()
     n_temas, n_scans = app4.themes_applied, app4.rescans
-    s.theme_var.set("claro")
+    s.theme_var.set("Warlords")
     s.budget_var.set(2500000)
     s.close()
     root.update()
     c6 = dsapi.Config()
-    check("cerrar sin guardar: el tema y el presupuesto quedan en disco", c6["theme"] == "claro" and c6["token_budget"] == 2500000, (c6["theme"], c6["token_budget"]))
+    check("cerrar sin guardar: el tema y el presupuesto quedan en disco", c6["theme"] == "Warlords" and c6["token_budget"] == 2500000, (c6["theme"], c6["token_budget"]))
     check("cerrar con el tema cambiado lo aplica; sin cambios locales no reescanea", app4.themes_applied == n_temas + 1 and app4.rescans == n_scans)
     s = dialogs.SettingsDialog(app4)
     root.update()
