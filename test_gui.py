@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import ttk
 
 try:
@@ -490,8 +491,11 @@ check("los temas son Predeterminado y Warlords; una config vieja «oscuro»/«cl
       and theme.canonical("claro") == "Predeterminado" and theme.canonical("Warlords") == "Warlords")
 app.cfg["theme"] = "Warlords"
 app.apply_theme()
-check("EFECTO: con Warlords el chat queda en el fondo de la terminal y en Consolas",
-      app.chat.text.cget("bg") == "#0e1016" and "Consolas" in str(app.chat.text.cget("font")), (app.chat.text.cget("bg"), app.chat.text.cget("font")))
+check("EFECTO: con Warlords el chat queda en el fondo de la terminal y en JetBrains Mono (incrustada)",
+      app.chat.text.cget("bg") == "#0e1016" and "JetBrains Mono" in str(app.chat.text.cget("font"))
+      and "JetBrains Mono" in tkfont.families(root), (app.chat.text.cget("bg"), app.chat.text.cget("font")))
+check("EFECTO: Warlords no toca el resto de la ventana (la entrada sigue con el predeterminado)",
+      app.input.cget("bg") == theme.THEMES["Predeterminado"]["side"] and app.t is theme.THEMES["Predeterminado"], app.input.cget("bg"))
 app.cfg["theme"] = "Predeterminado"
 app.apply_theme()
 check("CONTROL: Predeterminado vuelve al chat negro en Segoe UI",

@@ -1,4 +1,5 @@
 """Colores y estilos ttk. Un solo lugar para la app, los diálogos y los tests."""
+import os
 from tkinter import ttk
 
 THEMES = {
@@ -9,7 +10,7 @@ THEMES = {
                    final="#8be9fd", chat_bg="#000000"),      # el chat, en negro: la conversación contrasta con los paneles
     # La terminal del Actualizador de Warlords (actualizador-warlords, Terminal.cs: Paleta), sin el cartel gigante:
     # fondo casi negro, letra monoespaciada y los colores vivos de su paleta (verde, cian, violeta, naranja).
-    "Warlords": dict(dark=True, font="Consolas", bg="#0e1016", panel="#1a1d27", side="#151821", fg="#d8dee9",
+    "Warlords": dict(dark=True, font="JetBrains Mono", chat_only=True, terminal=True, title="#f1fa8c", bg="#0e1016", panel="#1a1d27", side="#151821", fg="#d8dee9",
                      muted="#6b7289", user="#ffb86c", bot="#50fa7b", code_bg="#1a1d27", reason="#6b7289",
                      accent="#bd93f9", accent_fg="#0e1016", err="#ff5555", border="#3a3f50", accent_text="#8be9fd",
                      meter_fill="#50fa7b", final="#f1fa8c", chat_bg="#0e1016"),
@@ -31,6 +32,36 @@ def canonical(name):
 
 def pick(name):
     return THEMES[canonical(name)]
+
+
+APP_THEME = "Predeterminado"      # la ventana siempre usa este; un tema chat_only cambia solo el panel de respuestas
+FONT_FILES = ("JetBrainsMono-Regular.ttf", "JetBrainsMono-Bold.ttf")
+_fonts_loaded = None
+
+
+def load_fonts(folder):
+    """Registra JetBrains Mono solo para este proceso (sin instalarla en Windows). True si quedó disponible."""
+    global _fonts_loaded
+    if _fonts_loaded is None:
+        try:
+            import ctypes
+            n = 0
+            for name in FONT_FILES:
+                p = os.path.join(folder, name)
+                if os.path.isfile(p):
+                    n += ctypes.windll.gdi32.AddFontResourceExW(p, 0x10, 0)      # FR_PRIVATE
+            _fonts_loaded = n > 0
+        except (AttributeError, OSError):
+            _fonts_loaded = False
+    return _fonts_loaded
+
+
+def chat_font(t, families=()):
+    """La letra del panel de respuestas: la del tema si existe en el sistema; si no, Consolas (como el Actualizador)."""
+    f = t.get("font", "Segoe UI")
+    if families and f not in families:
+        return "Consolas" if t.get("font") else "Segoe UI"
+    return f
 
 
 def ui_font(t):

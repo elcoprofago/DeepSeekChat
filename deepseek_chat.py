@@ -119,6 +119,7 @@ class App:
         self.local_models = []
         self._display_to_id = {}
         self.themes = theme.THEMES
+        theme.load_fonts(dsapi.APP_DIR)
         self.t = theme.pick(self.cfg["theme"])
         self.sess = None
         self.toolbox = None
@@ -451,9 +452,14 @@ class App:
         except tk.TclError:
             return None
 
-    def _place_sash(self):
+    def _place_sash(self, tries=40):
+        """Ubica la división de la barra lateral. Si la ventana todavía no tiene su tamaño (con JetBrains Mono el
+        primer dibujo tarda más), sashpos no surte efecto y la barra queda en 0: se reintenta hasta que quede."""
         try:
-            self.main.sashpos(0, int(self.cfg["sidebar_w"]))
+            want = int(self.cfg["sidebar_w"])
+            self.main.sashpos(0, want)
+            if tries > 0 and self.sidebar_visible and self.main.sashpos(0) < min(want, 160):
+                self.root.after(50, lambda: self._place_sash(tries - 1))
         except (tk.TclError, ValueError):
             pass
 
@@ -470,10 +476,14 @@ class App:
         self.sidebar_visible = not self.sidebar_visible
 
     def apply_theme(self):
-        self.t = t = theme.pick(self.cfg["theme"])
+        chat_t = theme.pick(self.cfg["theme"])
+        if chat_t.get("font"):
+            theme.load_fonts(dsapi.APP_DIR)
+        # un tema «solo chat» (Warlords) cambia el panel de respuestas; el resto de la ventana sigue con el predeterminado
+        self.t = t = theme.THEMES[theme.APP_THEME] if chat_t.get("chat_only") else chat_t
         theme.apply_styles(self.root, t)
         fs = int(self.cfg["font_size"])
-        self.chat.apply_theme(t, fs)
+        self.chat.apply_theme(chat_t, fs)
         self.input.configure(bg=t["side"], fg=t["fg"], insertbackground=t["fg"], highlightbackground=t["border"],
                              highlightcolor=t["accent"], font=(theme.ui_font(t), fs))
         if isinstance(self.btn_send, tk.Button):

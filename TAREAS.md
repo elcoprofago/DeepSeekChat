@@ -8,8 +8,9 @@
   Configuración para poder usar Claude.
 - [ ] **2.** Probar «sin razonar»: elegir DeepSeek-V4-Pro o Flash, en el desplegable de esfuerzo elegir
   «sin razonar» y mandar un pedido: la respuesta tiene que salir sin el bloque de razonamiento.
-- [ ] **3.** Probar los temas en CodeAgent 1.0.0.19: Configuración → Tema → elegir «Warlords», Guardar. La
-  ventana tiene que verse como la terminal del Actualizador (fondo casi negro, letra Consolas). Volver a
-  «Predeterminado» y ver que queda como siempre.
+- [ ] **3.** Probar el tema Warlords en CodeAgent 1.0.0.20: Configuración → Tema → «Warlords», Guardar. Solo el
+  panel de respuestas cambia: fondo casi negro, letra JetBrains Mono, tus mensajes como «w3 vos >» y los del
+  modelo como «─[ DEEPSEEK-V4-PRO ]». El resto de la ventana sigue igual. Volver a «Predeterminado» y ver que
+  queda como siempre.
 
 ## Hecho

@@ -4,7 +4,10 @@ import json
 import os
 import re
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import ttk
+
+import theme
 
 FENCE = re.compile(r"```([^\n`]*)\n(.*?)(?:```|\Z)", re.S)
 INLINE = re.compile(r"(\*\*[^*\n]+\*\*|`[^`\n]+`)")
@@ -73,12 +76,17 @@ class ChatView:
 
     def apply_theme(self, t, fs):
         self.t = t
-        ui = t.get("font", "Segoe UI")
+        ui = theme.chat_font(t, tkfont.families(self.text))
         c = self.text
         c.configure(bg=t.get("chat_bg", t["bg"]), fg=t["fg"], insertbackground=t["fg"], highlightbackground=t["border"],
                     highlightcolor=t["border"], font=(ui, fs), selectbackground=t["accent"], selectforeground=t["accent_fg"])
         c.tag_configure("hdr_user", foreground=t["user"], font=(ui, fs, "bold"), spacing1=10)
         c.tag_configure("hdr_bot", foreground=t["bot"], font=(ui, fs, "bold"), spacing1=10)
+        c.tag_configure("t_w3", foreground=t["fg"], font=(ui, fs, "bold"), spacing1=8)
+        c.tag_configure("t_dim", foreground=t["muted"], font=(ui, fs))
+        c.tag_configure("t_gt", foreground=t["err"], font=(ui, fs, "bold"))
+        c.tag_configure("t_frame", foreground=t["muted"], font=(ui, fs), spacing1=8)
+        c.tag_configure("t_title", foreground=t.get("title", t["bot"]), font=(ui, fs, "bold"))
         c.tag_configure("note", foreground=t["muted"], font=(ui, fs - 1, "italic"))
         c.tag_configure("error", foreground=t["err"], font=(ui, fs, "bold"))
         c.tag_configure("reason", foreground=t["reason"], font=(ui, fs - 1, "italic"))
@@ -185,8 +193,18 @@ class ChatView:
 
     # ------------------------------------------------------------ mensajes
 
+    def _terminal(self):
+        return bool(self.t and self.t.get("terminal"))
+
     def user(self, text, file_names):
-        self.put("\nVos\n", "hdr_user")
+        if self._terminal():
+            # como el indicador del Actualizador de Warlords: «w3 vos >»
+            self.put("\n")
+            self.put("w3 ", "t_w3")
+            self.put("vos", "t_dim")
+            self.put(" >\n", "t_gt")
+        else:
+            self.put("\nVos\n", "hdr_user")
         if text:
             self.put(text + "\n")
         for n in file_names:
@@ -195,7 +213,14 @@ class ChatView:
 
     def assistant_header(self, label):
         if self._last_role != "assistant" or label != self._last_label:
-            self.put(f"\n{label}\n", "hdr_bot")
+            if self._terminal():
+                # como los títulos de sección del Actualizador: «─[ MODELO ]»
+                self.put("\n")
+                self.put("─[ ", "t_frame")
+                self.put(label.upper(), "t_title")
+                self.put(" ]\n", "t_frame")
+            else:
+                self.put(f"\n{label}\n", "hdr_bot")
         self._last_role = "assistant"
         self._last_label = label
 

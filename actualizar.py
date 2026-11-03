@@ -27,6 +27,7 @@ API_ULTIMA = f"https://api.github.com/repos/{REPO}/releases/latest"
 MARKER = ".build_portable"
 ICONO = "asterisc.ico"
 IMAGENES = ("b-env.png", "b-stop.png", "b-clip.png")  # botones de enviar / detener / adjuntar de la ventana
+FUENTES = ("JetBrainsMono-Regular.ttf", "JetBrainsMono-Bold.ttf", "OFL-JetBrainsMono.txt")   # tema Warlords (licencia OFL)
 EXCLUIR_PREFIJO = "test_"
 EXCLUIR = ("build_portable.py",)
 
@@ -49,7 +50,7 @@ def es_archivo_de_app(nombre):
     """True si un archivo de la raíz del repo va a app\\ en la carpeta portable."""
     if nombre.startswith(EXCLUIR_PREFIJO) or nombre in EXCLUIR:
         return False
-    return nombre.endswith((".py", ".pyw")) or nombre == ICONO or nombre in IMAGENES
+    return nombre.endswith((".py", ".pyw")) or nombre == ICONO or nombre in IMAGENES or nombre in FUENTES
 
 
 def version_txt(v):
