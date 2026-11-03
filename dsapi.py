@@ -13,6 +13,8 @@ import urllib.error
 import urllib.request
 from ctypes import wintypes
 
+import ocr
+
 BASE = "https://api.deepseek.com"
 
 # Si /models no responde, estos son los que la API informó en la última verificación.
@@ -152,7 +154,7 @@ class ChatStream:
     OPEN_RETRIES = 2
 
     def __init__(self, key, model, messages, effort=None, max_tokens=32768, base=BASE, tools=None, timeout=120,
-                 open_timeout=None, retries=None, who=None, remote=None, token_param="max_tokens"):
+                 open_timeout=None, retries=None, who=None, remote=None, token_param="max_tokens", thinking=None):
         body = {
             "model": model,
             "messages": messages,
@@ -162,6 +164,8 @@ class ChatStream:
         }
         if effort:
             body["reasoning_effort"] = effort
+        if thinking is False:
+            body["thinking"] = {"type": "disabled"}     # DeepSeek V4: responde sin razonamiento (medido 3/11/2026)
         if tools:
             body["tools"] = tools
         headers = {"Content-Type": "application/json"}
@@ -345,14 +349,56 @@ def read_text_file(path):
     raise AttachError(f"{os.path.basename(path)}: no se pudo decodificar como texto")
 
 
-def build_message(text, paths, extra=()):
-    """Arma el contenido del mensaje de usuario con los archivos embebidos en bloques de código.
+MAX_IMAGE_BYTES = 15 * 1024 * 1024        # lo que se acepta adjuntar (para el OCR)
+MAX_VISION_BYTES = 5 * 1024 * 1024        # lo que se manda como imagen a un modelo que ve (tope de Claude por imagen)
+VISION_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+               ".webp": "image/webp"}
+
+
+def check_attachment(path):
+    """AttachError si el archivo no se puede adjuntar: texto que no se lee, o imagen demasiado grande."""
+    if ocr.is_image(path):
+        size = os.path.getsize(path)
+        if size > MAX_IMAGE_BYTES:
+            raise AttachError(f"{os.path.basename(path)} pesa {size // (1024 * 1024)} MB; el máximo por imagen es "
+                              f"{MAX_IMAGE_BYTES // (1024 * 1024)} MB")
+        return
+    read_text_file(path)
+
+
+def ocr_text(path, tesseract=None):
+    """El texto que reconoce Tesseract en la imagen, o el motivo por el que no se pudo."""
+    exe = tesseract or ocr.find_tesseract(portable_root())
+    try:
+        body = ocr.run(exe, path) or "OCR: no se encontró texto"
+    except (ocr.OcrTimeout, ocr.OcrError, ocr.OcrUnavailable) as e:
+        body = str(e)
+    return f"Texto extraído por OCR de la imagen {os.path.basename(path)}\n\n{body}"
+
+
+def image_payloads(paths):
+    """[{name, mime, data(base64)}] de las imágenes adjuntas que un modelo con visión puede recibir tal cual."""
+    out = []
+    for p in paths:
+        mime = VISION_MIME.get(os.path.splitext(p)[1].lower())
+        if not mime or not os.path.isfile(p) or os.path.getsize(p) > MAX_VISION_BYTES:
+            continue
+        with open(p, "rb") as f:
+            out.append({"name": os.path.basename(p), "mime": mime, "data": base64.b64encode(f.read()).decode("ascii")})
+    return out
+
+
+def build_message(text, paths, extra=(), tesseract=None):
+    """Arma el contenido del mensaje de usuario con los archivos embebidos en bloques de código. Una imagen entra
+    como el texto que le reconoce el OCR (la imagen misma viaja aparte, ver image_payloads).
     extra: pares (nombre, contenido) ya leídos (los adjuntos que llegan desde el celular), con los mismos límites."""
     total = 0
     parts = [text.strip()] if text.strip() else []
     for p in list(paths) + list(extra):
         if isinstance(p, tuple):
             name, content = p
+        elif ocr.is_image(p):
+            name, content = os.path.basename(p) + ".ocr.txt", ocr_text(p, tesseract)
         else:
             name, content = os.path.basename(p), read_text_file(p)
         total += len(content.encode("utf-8"))

@@ -147,6 +147,30 @@ def check_key(provider, key):
     return {"available": True, "text": f"{n} modelo{'s' if n != 1 else ''} disponible{'s' if n != 1 else ''}"}
 
 
+NO_THINK = "sin razonar"       # opción de la barra de esfuerzo: el modelo contesta sin razonamiento
+
+
+def with_no_think(entry):
+    """La entrada con «sin razonar» entre sus esfuerzos, si su proveedor permite apagar el razonamiento."""
+    p = entry.get("provider") or provider_of(entry["id"])
+    if p == "deepseek" or (p == "anthropic" and entry.get("adaptive", True)):
+        efforts = list(entry.get("efforts") or [])
+        if NO_THINK not in efforts:
+            return {**entry, "efforts": efforts + [NO_THINK]}
+    return entry
+
+
+def _openai_vision(m):
+    """Mensaje de usuario con '_images' -> contenido en partes (texto + imágenes), como lo pide OpenAI."""
+    base = {k: v for k, v in m.items() if k != "_images"}
+    imgs = m.get("_images")
+    if not imgs:
+        return base
+    parts = [{"type": "text", "text": m.get("content") or ""}] + [
+        {"type": "image_url", "image_url": {"url": f"data:{i['mime']};base64,{i['data']}"}} for i in imgs]
+    return {**base, "content": parts}
+
+
 def make_stream(entry, key, messages, effort=None, max_tokens=32768, tools=None):
     """El stream del proveedor de la entrada. max_tokens se recorta a la salida máxima del modelo, si se conoce."""
     provider = entry.get("provider") or provider_of(entry["id"])
@@ -154,12 +178,18 @@ def make_stream(entry, key, messages, effort=None, max_tokens=32768, tools=None)
     cap = entry.get("max_out") or 0
     if cap:
         max_tokens = min(int(max_tokens), int(cap))
+    no_think = effort == NO_THINK
+    if no_think:
+        effort = None
     if effort and entry.get("efforts") is not None and effort not in entry.get("efforts", []):
         effort = None                         # un esfuerzo que el modelo no acepta es un 400 seguro
     if provider == "anthropic":
         return claudeapi.ClaudeStream(key, model, messages, effort=effort, max_tokens=max_tokens, tools=tools,
-                                      adaptive=entry.get("adaptive", True))
+                                      adaptive=entry.get("adaptive", True) and not no_think)
     if provider == "openai":
+        messages = [_openai_vision(m) for m in messages]
         return dsapi.ChatStream(key, model, messages, effort=effort, max_tokens=max_tokens, base=OPENAI_BASE,
                                 tools=tools, who="OpenAI", remote=True, token_param="max_completion_tokens")
-    return dsapi.ChatStream(key, model, messages, effort=effort, max_tokens=max_tokens, tools=tools)
+    messages = [{k: v for k, v in m.items() if k != "_images"} for m in messages]
+    return dsapi.ChatStream(key, model, messages, effort=effort, max_tokens=max_tokens, tools=tools,
+                            thinking=False if no_think else None)

@@ -582,7 +582,7 @@ class App:
         """El modelo (remoto o local) de un id guardado. Si ya no está en las listas se fabrica uno, para no perder la sesión."""
         for m in self.remote_models:
             if m["id"] == mid:
-                return {**m, "kind": "remote", "provider": self._prov(m)}
+                return providers.with_no_think({**m, "kind": "remote", "provider": self._prov(m)})
         for m in self.local_models:
             if m["id"] == mid:
                 return self._local_entry(m)
@@ -599,7 +599,7 @@ class App:
         p = providers.provider_of(mid)
         for m in providers.fallback(p):          # sin key o sin listar todavía: los datos conocidos del modelo
             if m["id"] == mid:
-                return m
+                return providers.with_no_think(m)
         return {"id": mid, "kind": "remote", "provider": p, "name": providers.api_model(mid), "efforts": [], "context": 0}
 
     def _display(self, entry):
@@ -611,7 +611,7 @@ class App:
         return f"[local] {entry['name']}" + (f" ({localmodels.format_size(entry['size'])})" if entry.get("size") else "")
 
     def _all_entries(self):
-        return [{**m, "kind": "remote", "provider": self._prov(m)} for m in self.remote_models] + \
+        return [providers.with_no_think({**m, "kind": "remote", "provider": self._prov(m)}) for m in self.remote_models] + \
                [self._local_entry(m) for m in self.local_models]
 
     def _local_entry(self, m):
@@ -1012,7 +1012,7 @@ class App:
             if p in self.attachments:
                 continue
             try:
-                dsapi.read_text_file(p)
+                dsapi.check_attachment(p)
             except (dsapi.AttachError, OSError) as e:
                 self.warn(str(e))
                 continue
@@ -1439,7 +1439,11 @@ class App:
             self.warn(str(e))
             return
         n0 = len(s.messages)
-        s.messages.append({"role": "user", "content": content})
+        umsg = {"role": "user", "content": content}
+        imgs = dsapi.image_payloads(files)
+        if imgs:
+            umsg["_images"] = imgs       # solo lo reciben los modelos que ven imágenes (Claude, OpenAI); el resto, el OCR
+        s.messages.append(umsg)
         self.chat.user(full_text, files + [n for n, _ in extra])
         self._last_notice = ""
         if not keep_draft:
@@ -1494,6 +1498,13 @@ class App:
         effort = s.effort if s.effort in (entry["efforts"] or []) else None   # el de un modelo local no viaja a la API
         return providers.make_stream(entry, self.cfg.key(self._prov(entry)), msgs, effort, self.cfg["max_tokens"], tools=tools)
 
+    def _keep_fields(self, entry):
+        """Campos privados que viajan a la API: la respuesta cruda de Claude y las imágenes para los que ven."""
+        if entry["kind"] != "remote":
+            return ()
+        p = self._prov(entry)
+        return ("_blocks", "_images") if p == "anthropic" else ("_images",) if p == "openai" else ()
+
     def _local_max_tokens(self):
         """Tope de respuesta de un modelo local. Es también lo que se le reserva dentro de la ventana: el historial
         se recorta para que prompt + respuesta entren en local_ctx (si no, llama-server corta la respuesta a la mitad)."""
@@ -1543,7 +1554,7 @@ class App:
                 self.log(f"Modelo local {entry['name']} listo ({time.time() - t0:.0f} s).", "OK", overwrite=True, protect=True)
             agent = ag.Agent(lambda msgs, tools: self._make_stream(entry, s, base, msgs, tools, toolbox), toolbox,
                              max_steps=self.max_steps, label=self._label_of(entry), **self._agent_budget(entry, toolbox),
-                             keep=("_blocks",) if entry["kind"] == "remote" and self._prov(entry) == "anthropic" else ())
+                             keep=self._keep_fields(entry))
             self.agent = agent
             outcome = agent.run(s.messages, emit, cancel)
         except Exception as e:                      # noqa: BLE001 — cualquier falla se muestra, ninguna se traga

@@ -379,7 +379,9 @@ def convert_messages(messages):
                 system.append(m["content"])
         elif role == "user":
             text = m.get("content") or ""
-            push("user", [{"type": "text", "text": text}] if text.strip() else [])
+            imgs = [{"type": "image", "source": {"type": "base64", "media_type": i["mime"], "data": i["data"]}}
+                    for i in m.get("_images") or []]
+            push("user", imgs + ([{"type": "text", "text": text}] if text.strip() else []))
         elif role == "tool":
             res = m.get("content") or "(sin salida)"
             b = {"type": "tool_result", "tool_use_id": _tool_id(m.get("tool_call_id")), "content": res}
