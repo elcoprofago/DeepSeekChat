@@ -25,6 +25,7 @@ import claudeapi
 import dialogs
 import dsapi
 import explorer
+import gpumon
 import localmodels
 import logpanel
 import meter
@@ -252,6 +253,7 @@ class App:
         self.btn_update.pack(side="right", padx=(6, 0))
         self.btn_remote = ttk.Button(top, text="📱 Remoto", command=self.open_remote)
         self.btn_remote.pack(side="right", padx=6)
+        ttk.Button(top, text="📊 Monitor GPU", command=self.open_gpu_monitor).pack(side="right")
         ttk.Button(top, text="Exportar", command=self.export_current).pack(side="right", padx=6)
         self.btn_undo = ttk.Button(top, text="Deshacer cambio", command=self.undo)
         self.btn_undo.pack(side="right")
@@ -1377,6 +1379,14 @@ class App:
 
     def open_remote(self):
         dialogs.RemoteDialog(self)
+
+    def open_gpu_monitor(self):
+        try:
+            falta = gpumon.launch(dsapi.APP_DIR)
+        except OSError as e:
+            falta = f"No se pudo abrir gputaskman: {e}"
+        if falta:
+            messagebox.showwarning("Monitor GPU", falta, parent=self.root)
 
     def _local_server(self):
         exe = localmodels.find_llama_server(self.cfg["llama_server_path"])
