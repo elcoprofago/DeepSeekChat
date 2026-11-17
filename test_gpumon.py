@@ -18,6 +18,9 @@ class T(unittest.TestCase):
             self.assertEqual(gpumon.find_command(app, nada), [exe])
             exe2 = os.path.join(app, "gputaskman.exe"); open(exe2, "w").close()
             self.assertEqual(gpumon.find_command(app, nada), [exe2])
+            b = os.path.join(d, "bin", "gputaskman"); os.makedirs(b)
+            exe3 = os.path.join(b, "gputaskman.exe"); open(exe3, "w").close()
+            self.assertEqual(gpumon.find_command(app, nada), [exe3])
 
 
 if __name__ == "__main__":

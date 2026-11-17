@@ -2,10 +2,12 @@
 
 ## Pendientes
 
-- [ ] **4.** Probar el botón «📊 Monitor GPU» de CodeAgent 1.0.0.21 (panel de arriba, a la derecha): tiene que
+- [ ] **4.** Probar el botón «📊 Monitor GPU» de CodeAgent 1.0.0.22 (panel de arriba, a la derecha): tiene que
   abrirse una consola negra con el monitor de la placa de video (RTX 5050, uso, memoria y los programas que la
-  usan). Se cierra con la tecla `q`. La primera vez puede tardar un rato porque lo baja de internet. Si en vez del
-  monitor la consola dice «gputaskman termino con error», sacarle una captura.
+  usan). Se cierra con la tecla `q`. Desde 1.0.0.22 el monitor viene incluido en la carpeta portable y no se baja
+  de internet; el botón «Actualizar» no lo agrega a un pendrive ya armado: conectá el pendrive y pedile a Claude
+  «rearmá el pendrive de CodeAgent». Si en vez del monitor la consola dice «gputaskman termino con error», sacale
+  una captura.
 
 ## Hecho
 

@@ -1,7 +1,7 @@
-"""Botón «Monitor GPU»: abre gputaskman (monitor de GPU de terminal) en una consola nueva.
+r"""Botón «Monitor GPU»: abre gputaskman (monitor de GPU de terminal) en una consola nueva.
 
-No depende de ningún otro repo: busca, en este orden, un gputaskman.exe portátil junto al programa (o en la carpeta
-de arriba, la del pendrive), un gputaskman instalado en el PATH, y si no hay ninguno lo corre con «uvx gputaskman»,
+No depende de ningún otro repo: busca, en este orden, el que trae la carpeta portable (bin\gputaskman\, lo pone
+build_portable.py), un gputaskman.exe junto al programa o en la carpeta de arriba, un gputaskman instalado en el PATH, y si no hay ninguno lo corre con «uvx gputaskman»,
 que lo baja de PyPI. Si tampoco hay uv, find_command devuelve None y la ventana dice qué falta.
 """
 import os
@@ -14,8 +14,9 @@ FALTA = ("No se encontró gputaskman.\n\nOpciones: poner gputaskman.exe (ejecuta
 
 
 def find_command(app_dir, which=shutil.which):
-    for d in (app_dir, os.path.dirname(app_dir)):
-        exe = os.path.join(d, "gputaskman.exe")
+    raiz = os.path.dirname(app_dir)
+    for exe in (os.path.join(raiz, "bin", "gputaskman", "gputaskman.exe"),
+                os.path.join(app_dir, "gputaskman.exe"), os.path.join(raiz, "gputaskman.exe")):
         if os.path.isfile(exe):
             return [exe]
     exe = which("gputaskman")

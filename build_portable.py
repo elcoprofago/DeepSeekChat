@@ -19,6 +19,9 @@ Seguridad: app\\, runtime\\ y bin\\ llevan un archivo marcador; solo se reemplaz
 con ese nombre SIN marcador, el script se detiene en vez de pisarla. data\\ y Models\\ nunca se borran ni se reemplazan.
 """
 import argparse
+import hashlib
+import urllib.request
+import zipfile
 import fnmatch
 import glob
 import os
@@ -171,6 +174,52 @@ def fill_tesseract(src):
         n = copy_matching(src, dst, patterns=("tesseract.exe", "*.dll"))
         copy_matching(os.path.join(src, "tessdata"), os.path.join(dst, "tessdata"), patterns=TESS_LANGS)
         say(f"  bin\\tesseract: {n} archivos de {src}, idiomas {', '.join(x.split('.')[0] for x in TESS_LANGS)}")
+    return fill
+
+
+GTM_VERSION = "0.4.3"
+GTM_ZIP = f"gputaskman-{GTM_VERSION}-windows-x64.zip"
+GTM_URL = f"https://github.com/shanselman/gputaskman/releases/download/v{GTM_VERSION}/{GTM_ZIP}"
+GTM_SHA256 = "eeca21f9d4ee7bb892c731682356db153f13438b0897f869bedb72fafa3dae98"
+
+
+def get_gputaskman_zip():
+    """Zip del gputaskman portátil, desde dist\cache o bajado de GitHub; None (con aviso) si no se consigue."""
+    cache = os.path.join(HERE, "dist", "cache")
+    os.makedirs(cache, exist_ok=True)
+    z = os.path.join(cache, GTM_ZIP)
+    if not os.path.isfile(z):
+        say(f"  bajando {GTM_URL}")
+        try:
+            urllib.request.urlretrieve(GTM_URL, z + ".part")
+        except OSError as e:
+            say(f"  AVISO: no se pudo bajar gputaskman ({e}); el botón «Monitor GPU» lo buscará en el equipo.")
+            return None
+        os.replace(z + ".part", z)
+    with open(z, "rb") as f:
+        h = hashlib.sha256(f.read()).hexdigest()
+    if h != GTM_SHA256:
+        os.remove(z)
+        die(f"{GTM_ZIP} no coincide con su SHA-256 publicado (bajado {h}); se borró, volver a armar.")
+    return z
+
+
+def fill_gputaskman(z):
+    def fill(dst):
+        raiz = GTM_ZIP[:-4] + "/"
+        n = 0
+        with zipfile.ZipFile(z) as zf:
+            for i in zf.infolist():
+                if i.is_dir() or not i.filename.startswith(raiz) or ".." in i.filename:
+                    continue
+                dest = os.path.join(dst, *i.filename[len(raiz):].split("/"))
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with zf.open(i) as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                n += 1
+        if not os.path.isfile(os.path.join(dst, "gputaskman.exe")):
+            die(f"{GTM_ZIP} no trae gputaskman.exe")
+        say(f"  bin\gputaskman: {n} archivos (gputaskman {GTM_VERSION})")
     return fill
 
 
@@ -340,6 +389,15 @@ def main():
             replace_managed(os.path.join(bin_dir, "tesseract"), fill_tesseract(tess))
         elif tess:
             replace_managed(bin_dir, make_bin_filler("", None, tess))
+
+    gtm = get_gputaskman_zip()
+    if gtm:
+        bin_dir = os.path.join(out, "bin")
+        if not os.path.isdir(bin_dir):
+            replace_managed(bin_dir, make_bin_filler("", None))
+        elif not is_managed(bin_dir):
+            die(f"{bin_dir} existe y no tiene el marcador {MARKER}: no lo creó este script, no se toca.")
+        replace_managed(os.path.join(bin_dir, "gputaskman"), fill_gputaskman(gtm))
 
     for d in ("data", "Models"):
         os.makedirs(os.path.join(out, d), exist_ok=True)
