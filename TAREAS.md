@@ -2,13 +2,14 @@
 
 ## Pendientes
 
-- [ ] **4.** Probar el botón «📊 Monitor GPU» de CodeAgent 1.0.0.23 desde la PC (el ícono de siempre, no el
-  pendrive): la primera vez escribe abajo «bajando gputaskman…» y en unos segundos abre la consola negra con el
-  monitor; las siguientes veces abre de inmediato. Se cierra con la tecla `q`. Desde el pendrive ya funcionó
-  (16/11/2026). Si sale un error, sacale una captura.
+(ninguna)
 
 ## Hecho
 
+- [x] **4.** Probar el botón «📊 Monitor GPU» de CodeAgent 1.0.0.23 desde la PC (el ícono de siempre, no el
+  pendrive): la primera vez escribe abajo «bajando gputaskman…» y en unos segundos abre la consola negra con el
+  monitor; las siguientes veces abre de inmediato. Se cierra con la tecla `q`. Desde el pendrive ya funcionó
+  (16/11/2026). — Funciona desde la PC y desde el pendrive (16/11/2026).
 - [x] **1.** Probar imágenes en CodeAgent 1.0.0.18: botón del clip → elegir una captura con texto → preguntar
   «¿qué dice?». Con DeepSeek tiene que contestar usando el texto leído (OCR). Con Claude u OpenAI, además, ve la
   imagen. — Marcada cumplida por el usuario (registrada el 16/11/2026).
