@@ -1381,12 +1381,26 @@ class App:
         dialogs.RemoteDialog(self)
 
     def open_gpu_monitor(self):
+        cmd = gpumon.find_command(dsapi.APP_DIR, self.cfg.dir)
+        if cmd:
+            self._launch_gpu_monitor(cmd)
+            return
+        self.log(f"Monitor GPU: bajando gputaskman {gpumon.VERSION} (una sola vez, ~15 MB)…")
+
+        def work():
+            try:
+                cmd = [gpumon.install(self.cfg.dir)]
+            except (OSError, gpumon.GpuMonError) as e:
+                self.root.after(0, lambda e=e: messagebox.showwarning("Monitor GPU", str(e), parent=self.root))
+                return
+            self.root.after(0, lambda: (self.log("Monitor GPU: gputaskman listo."), self._launch_gpu_monitor(cmd)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _launch_gpu_monitor(self, cmd):
         try:
-            falta = gpumon.launch(dsapi.APP_DIR)
+            gpumon.launch(cmd)
         except OSError as e:
-            falta = f"No se pudo abrir gputaskman: {e}"
-        if falta:
-            messagebox.showwarning("Monitor GPU", falta, parent=self.root)
+            messagebox.showwarning("Monitor GPU", f"No se pudo abrir gputaskman: {e}", parent=self.root)
 
     def _local_server(self):
         exe = localmodels.find_llama_server(self.cfg["llama_server_path"])
