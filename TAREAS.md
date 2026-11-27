@@ -2,7 +2,10 @@
 
 ## Pendientes
 
-(ninguna)
+- [ ] **5.** Probar Inkling 2 Mini en CodeAgent 1.0.0.24: en el selector de modelos elegir
+  «Inkling-2-Mini-UD-Q4_K_M-mainline» y pedirle algo de código. La primera carga tarda 1 a 2 minutos; después
+  responde a unos 10 tokens por segundo (más lento que Qwen, pero razona más directo). Si sale un error, sacale
+  una captura.
 
 ## Hecho
 
