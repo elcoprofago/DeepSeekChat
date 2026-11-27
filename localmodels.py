@@ -6,6 +6,7 @@ así que el agente lo usa igual; solo cambia la URL base.
 import ctypes
 import json
 import os
+import re
 import socket
 import subprocess
 import time
@@ -151,6 +152,16 @@ PROFILES = (
                  "sampling": {"off": QWEN35_INSTRUCT, "on": QWEN35_THINKING_CODE}}),
     ("thinking", {"reasoning": None, "kv_q8": True, "moe": False}),   # Qwen3-*-Thinking: piensa siempre
     ("deepseek-r1", {"reasoning": None, "kv_q8": True, "moe": False}),
+    # Inkling 2 (Thinking Machines), en los GGUF «Mainline_Support» de Unsloth: los de la raíz de su repo son para su
+    # propio llama.cpp y en el oficial cargan igual pero andan a 1,4 tok/s. Necesita llama-server b12611 o posterior
+    # (soporte de inkling2_loop y #32704). Medido el 26/11/2026 con b12780, prompt de 2806 tokens:
+    #   --fit solo: prompt 83 tok/s, generación 5,0 · --n-cpu-moe 16: 13,5 / 13,0 (VRAM llena: el prompt se hunde)
+    #   --n-cpu-moe 20: 24,5 / 11,5 · --n-cpu-moe 24 (todos los expertos en la CPU): 44,6 / 10,7, el mejor para
+    #   un pedido de agente (2800 de prompt + 500 de respuesta: ~110 s, contra 134 con --fit solo).
+    # Calidad (6 problemas verificables, razonando): 5/6 contra 4/6 de Qwen3.6-35B-A3B, con 3 a 6 veces menos tokens.
+    # Muestreo de la tarjeta de Unsloth: temp 1, sin recorte.
+    ("inkling-2", {"reasoning": None, "kv_q8": False, "moe": False, "min_build": 12611,
+                   "args": ["--n-cpu-moe", "24", "--temp", "1.0", "--top-p", "1.0", "--top-k", "0", "--min-p", "0"]}),
 )
 DEFAULT_PROFILE = {"reasoning": None, "kv_q8": True, "moe": False}
 KV_Q8_FROM = 32768
@@ -186,7 +197,55 @@ def server_args(model_path, ctx, reasoning=None):
     if reasoning in ("on", "off"):
         args += ["--reasoning", reasoning]
     args += prof.get("sampling", {}).get(reasoning, [])
+    args += prof.get("args", [])
     return args
+
+
+_BUILDS = {}
+
+
+def llama_build(exe):
+    """El número de build de un llama-server.exe (por ejemplo 9775), o None si no se pudo leer."""
+    key = os.path.normcase(os.path.abspath(exe))
+    if key not in _BUILDS:
+        try:
+            out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            text = (out.stdout or "") + (out.stderr or "")
+            # b9775 dice «version: 9775 (be4a6a63e)»; b12780, «version: 1.1.0-dev (build 12780, ...)»
+            m = re.search(r"\(build (\d+)", text) or re.search(r"version: (\d+) \(", text)
+            _BUILDS[key] = int(m.group(1)) if m else None
+        except (OSError, subprocess.SubprocessError):
+            _BUILDS[key] = None
+    return _BUILDS[key]
+
+
+def exe_for(model_path, exe):
+    """El llama-server que sirve para ese modelo. Si el perfil pide un build mínimo y el configurado es más viejo,
+    busca otro más nuevo en las carpetas hermanas (E:\\llama-server-b12780 junto a E:\\llama-server), para que el
+    viejo siga sirviendo a los demás modelos. Si no hay ninguno, lo dice en vez de cargar un modelo que andaría mal."""
+    need = profile_for(model_path).get("min_build")
+    if not need:
+        return exe
+    have = llama_build(exe)
+    if have is not None and have >= need:
+        return exe
+    parent = os.path.dirname(os.path.dirname(os.path.abspath(exe)))
+    best = None
+    try:
+        for d in os.listdir(parent):
+            cand = os.path.join(parent, d, "llama-server.exe")
+            if d.lower().startswith("llama") and os.path.isfile(cand):
+                b = llama_build(cand)
+                if b is not None and b >= need and (best is None or b > best[0]):
+                    best = (b, cand)
+    except OSError:
+        pass
+    if best:
+        return best[1]
+    raise LocalError(f"{os.path.basename(model_path)} necesita llama-server b{need} o posterior, y el configurado es "
+                     f"b{have if have is not None else '?'}. Bajá una versión nueva de "
+                     "github.com/ggml-org/llama.cpp/releases a una carpeta junto a la actual.")
 
 
 def find_llama_server(configured=""):
@@ -320,8 +379,9 @@ class LocalServer:
             raise LocalError(f"No se encuentra el modelo {model_path} (¿está conectado el pendrive?)")
         check_memory(model_path)
         os.makedirs(self.log_dir, exist_ok=True)
+        exe = exe_for(model_path, self.exe)
         self.port = _free_port()
-        args = [self.exe, "-m", model_path, "--host", "127.0.0.1", "--port", str(self.port),
+        args = [exe, "-m", model_path, "--host", "127.0.0.1", "--port", str(self.port),
                 "-np", "1", "--jinja", "--no-webui"] + server_args(model_path, ctx, reasoning)
         if self.threads:
             args += ["-t", str(self.threads)]

@@ -151,6 +151,36 @@ check("Qwen3.5 razonando: muestreo de la tarjeta (thinking, código)", q35r[q35r
 check("CONTROL: los perfiles sin muestreo medido siguen con los de llama.cpp",
       not any(a in ("--temp", "--top-p", "--top-k", "--min-p") for a in a32 + glm + q36), a32 + glm + q36)
 check("un esfuerzo de DeepSeek guardado en la sesión no cambia el razonamiento local", lm.reasoning_for("Qwen3.5-9B.gguf", "high") == "off")
+ink = lm.server_args(r"E:\Models\Inkling-2-Mini-UD-Q4_K_M-mainline.gguf", 16384, lm.reasoning_for("Inkling-2-Mini-UD-Q4_K_M.gguf"))
+check("Inkling 2: expertos en la CPU, muestreo de la tarjeta, sin -ngl ni --reasoning",
+      ink[ink.index("--n-cpu-moe") + 1] == "24" and ink[ink.index("--temp") + 1] == "1.0" and "-ngl" not in ink and "--reasoning" not in ink, ink)
+check("CONTROL: los demás perfiles no reciben --n-cpu-moe", "--n-cpu-moe" not in a32 + glm + q36 + q35)
+
+# --- llama-server por modelo: Inkling 2 necesita b12611+; los demás siguen con el configurado
+orig_build = lm.llama_build
+try:
+    tmp = os.path.join(d, "llamas")
+    for sub in ("llama-server", "llama-server-b12780", "otra-cosa"):
+        os.makedirs(os.path.join(tmp, sub), exist_ok=True)
+        open(os.path.join(tmp, sub, "llama-server.exe"), "w").close()
+    fake = {"llama-server": 9775, "llama-server-b12780": 12780, "otra-cosa": 99999}
+    lm.llama_build = lambda exe: fake[os.path.basename(os.path.dirname(exe))]
+    old = os.path.join(tmp, "llama-server", "llama-server.exe")
+    got = lm.exe_for("Inkling-2-Mini-UD-Q4_K_M.gguf", old)
+    check("Inkling con llama-server viejo: usa el nuevo de la carpeta hermana", got.endswith(os.path.join("llama-server-b12780", "llama-server.exe")), got)
+    check("CONTROL: Qwen sigue con el configurado (viejo)", lm.exe_for("Qwen3.6-35B-A3B.gguf", old) == old)
+    check("CONTROL: una carpeta que no empieza con «llama» no se usa", "otra-cosa" not in got)
+    os.remove(os.path.join(tmp, "llama-server-b12780", "llama-server.exe"))
+    try:
+        lm.exe_for("Inkling-2-Mini.gguf", old)
+        check("sin build nuevo: se niega con un mensaje claro", False)
+    except lm.LocalError as e:
+        check("sin build nuevo: se niega con un mensaje claro", "b12611" in str(e) and "b9775" in str(e), str(e))
+finally:
+    lm.llama_build = orig_build
+for exe, want in ((r"E:\llama-server\llama-server.exe", 9775), (r"E:\llama-server-b12780\llama-server.exe", 12780)):
+    if os.path.isfile(exe):
+        check(f"llama_build lee el build real de {exe}", lm.llama_build(exe) == want, lm.llama_build(exe))
 
 MODEL = r"E:\Models\Nvidia\Qwen2.5-0.5B-Instruct-Q3_K_L.gguf"
 if not os.path.isfile(MODEL) or not srv_exe:
